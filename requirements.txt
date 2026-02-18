@@ -1,0 +1,8 @@
+torch
+torchvision
+timm
+einops
+pytorchvideo
+pyyaml
+av  # PyAV for video decoding
+modal
