@@ -1,8 +1,29 @@
+# Core deep learning
 torch
 torchvision
 timm
 einops
+
+# Video backbone
 pytorchvideo
+
+# HuggingFace VideoMAE
+transformers>=4.40.0
+
+# Video decoding
+av
+
+# S3 access
+boto3
+
+# Evaluation metric
+scikit-learn
+
+# Config & utilities
 pyyaml
-av  # PyAV for video decoding
+tqdm
+Pillow
+numpy
+
+# Modal cloud compute
 modal

@@ -1,23 +1,37 @@
 model:
-  backbone: "video_swin_tiny"   # or "x3d_m", "timesformer", etc.
-  num_classes: 20               # THUMOS-14 has 20 action classes
+  backbone: "videomae_base"   # choices: videomae_base | videomae_large | x3d_m
+  num_classes: 101            # number of classes in data/Class Index.txt
+  pooling: "mean"             # choices: mean | attention
   pretrained: true
+  dropout: 0.5
 
 data:
-  clip_len: 16
-  frame_interval: 4
+  clip_len: 16                # frames per clip
+  frame_interval: 4           # temporal stride between sampled frames
   num_workers: 4
   batch_size: 8
+  img_size: 224               # spatial crop size
 
 training:
   epochs: 30
-  lr: 1e-4
-  weight_decay: 1e-4
-  lr_scheduler: "cosine"
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  lr_scheduler: "cosine"      # choices: cosine | constant
   warmup_epochs: 5
+  grad_clip: 1.0
+  label_smoothing: 0.1
 
+# ── S3 storage ──────────────────────────────────────────────────────────────
+# To migrate to a different bucket, change `bucket` here.
+# All S3 I/O is routed through src.utils.S3Store which reads from this section.
+storage:
+  bucket: "thumos14-videos"   # ← change this to migrate buckets
+  region: "us-east-1"
+  prefix: ""                  # optional key prefix (useful for shared buckets)
+  manifest_prefix: "manifests"
+  video_prefix: "videos"
+
+# ── Modal Volume paths (inside /vol) ────────────────────────────────────────
 paths:
-  # These are paths *inside* the Modal Volume
-  data_root: "/data/thumos"
-  checkpoint_dir: "/checkpoints"
-  log_dir: "/logs"
+  checkpoint_dir: "/vol/checkpoints"
+  log_dir: "/vol/logs"
