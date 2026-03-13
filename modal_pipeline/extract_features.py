@@ -1,7 +1,15 @@
 import modal
 import os
 import torch
-from modal_pipeline.app import app, image, volume, VOLUME_MOUNT_PATH
+from modal_pipeline.app import (
+    app,
+    image,
+    volume,
+    ARTIFACT_DIR,
+    FEATURE_DIR,
+    RAW_DATA_DIR,
+    VOLUME_MOUNT_PATH,
+)
 
 GPU = modal.gpu.A10G()   # Feature extraction benefits from a strong GPU
 
@@ -19,10 +27,11 @@ GPU = modal.gpu.A10G()   # Feature extraction benefits from a strong GPU
     retries=1,
 )
 def extract_features(
-    backbone_name: str = "x3d_m",
+    config_path: str = "configs/base_config.yaml",
+    backbone_name: str = "",
     clip_len_sec:  float = 2.0,
     stride_sec:    float = 1.0,
-    num_frames:    int   = 16,
+    num_frames:    int   = 0,
     batch_size:    int   = 16,
 ):
     import sys
@@ -37,16 +46,31 @@ def extract_features(
     logger = get_logger("feature_extraction")
     device = torch.device("cuda")
 
+    with open(f"/root/{config_path}") as f:
+        config = yaml.safe_load(f)
+
+    if not backbone_name:
+        backbone_name = config["model"].get("backbone", "x3d_m")
+    if num_frames <= 0:
+        num_frames = config["data"].get("num_frames", config["data"].get("clip_len", 16))
+    batch_size = config["data"].get("batch_size", batch_size)
+    pretrained = config["model"].get("pretrained", True)
+    paths = config.setdefault("paths", {})
+    paths["data_root"] = RAW_DATA_DIR
+    paths["feature_dir"] = FEATURE_DIR
+    paths["artifact_dir"] = ARTIFACT_DIR
+    os.makedirs(paths["feature_dir"], exist_ok=True)
+    os.makedirs(paths["artifact_dir"], exist_ok=True)
+
     # --- Build backbone (inference only, no head) ---
     logger.info(f"Loading backbone: {backbone_name}")
-    backbone, feature_dim = build_backbone(backbone_name, pretrained=True)
+    backbone, feature_dim = build_backbone(backbone_name, pretrained=pretrained)
     backbone = backbone.to(device).eval()
 
     # --- Dataset ---
-    video_dir  = os.path.join(VOLUME_MOUNT_PATH, "raw", "videos")
-    ann_path   = os.path.join(VOLUME_MOUNT_PATH, "raw", "annotations", "thumos14.json")
-    feat_dir   = os.path.join(VOLUME_MOUNT_PATH, "features", "clip_level")
-    os.makedirs(feat_dir, exist_ok=True)
+    video_dir = os.path.join(paths["data_root"], "videos")
+    ann_path = os.path.join(paths["data_root"], "annotations", "thumos14.json")
+    feat_dir = paths["feature_dir"]
 
     dataset = THUMOSVideoDataset(
         video_dir=video_dir,
@@ -91,6 +115,12 @@ def extract_features(
     volume.commit()
     logger.info(f"Done. Features saved to {feat_dir}")
     logger.info(f"Feature dim: {feature_dim}")
+    return {
+        "backbone": backbone_name,
+        "feature_dim": int(feature_dim),
+        "feature_dir": feat_dir,
+        "num_clips": len(dataset),
+    }
 
 
 def _flush_features(video_features: dict, feat_dir: str, complete_only: bool):
@@ -110,11 +140,15 @@ def _flush_features(video_features: dict, feat_dir: str, complete_only: bool):
 
 
 @app.local_entrypoint()
-def main():
+def main(
+    config_path: str = "configs/base_config.yaml",
+    backbone_name: str = "",
+):
     extract_features.remote(
-        backbone_name="x3d_m",
+        config_path=config_path,
+        backbone_name=backbone_name,
         clip_len_sec=2.0,
         stride_sec=1.0,
-        num_frames=16,
+        num_frames=0,
         batch_size=16,
     )

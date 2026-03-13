@@ -3,6 +3,8 @@ torchvision
 timm
 einops
 pytorchvideo
+transformers
 pyyaml
 av  # PyAV for video decoding
 modal
+matplotlib

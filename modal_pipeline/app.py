@@ -7,6 +7,11 @@ app = modal.App("thumos-action-recognition")
 # Use this for your dataset and checkpoints so you don't re-upload every time
 volume = modal.Volume.from_name("thumos-vol", create_if_missing=True)
 VOLUME_MOUNT_PATH = "/vol"  # Where the volume appears inside the container
+RAW_DATA_DIR = f"{VOLUME_MOUNT_PATH}/raw"
+FEATURE_DIR = f"{VOLUME_MOUNT_PATH}/features/clip_level"
+CHECKPOINT_DIR = f"{VOLUME_MOUNT_PATH}/checkpoints"
+LOG_DIR = f"{VOLUME_MOUNT_PATH}/logs"
+ARTIFACT_DIR = f"{VOLUME_MOUNT_PATH}/artifacts"
 
 # --- Container Image ---
 # Modal builds this once and caches it

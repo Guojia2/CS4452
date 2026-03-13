@@ -1,5 +1,5 @@
 import modal
-from modal_pipeline.app import app, image, volume, VOLUME_MOUNT_PATH
+from modal_pipeline.app import app, image, volume, RAW_DATA_DIR, VOLUME_MOUNT_PATH
 import os
 
 @app.function(
@@ -13,7 +13,7 @@ def upload_dataset(local_data_path: str):
     Usage:  modal run modal_pipeline/data_prep.py
     """
     import shutil
-    dest = os.path.join(VOLUME_MOUNT_PATH, "thumos")
+    dest = RAW_DATA_DIR
     print(f"Copying data to {dest}...")
     shutil.copytree(local_data_path, dest, dirs_exist_ok=True)
     volume.commit()  # Flush writes to the Volume

@@ -1,132 +1,126 @@
-import numpy as np
-from typing import List, Dict, Tuple
-from src.utils import iou_1d
+import json
+import os
+from typing import Dict
+
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Subset
+
+from src.dataset import THUMOSFeatureDataset
+from src.model import TemporalDetectionHead
+from src.utils import load_checkpoint
 
 
-def compute_ap(
-    predictions: np.ndarray,    # (N, 3): [score, pred_start, pred_end]
-    ground_truths: np.ndarray,  # (M, 2): [gt_start, gt_end]
-    iou_threshold: float,
-) -> float:
-    """
-    Compute Average Precision for a single class at a given IoU threshold.
-    Predictions must be pre-sorted by score (descending) before calling this.
-    """
-    if len(ground_truths) == 0:
-        return 0.0
-
-    scores    = predictions[:, 0]
-    pred_segs = predictions[:, 1:]         # (N, 2)
-
-    sort_idx  = np.argsort(-scores)
-    pred_segs = pred_segs[sort_idx]
-
-    iou_mat   = iou_1d(pred_segs, ground_truths)  # (N, M)
-    matched_gt = np.zeros(len(ground_truths), dtype=bool)
-
-    tp = np.zeros(len(pred_segs))
-    fp = np.zeros(len(pred_segs))
-
-    for i, iou_row in enumerate(iou_mat):
-        best_gt = np.argmax(iou_row)
-        if iou_row[best_gt] >= iou_threshold and not matched_gt[best_gt]:
-            tp[i] = 1
-            matched_gt[best_gt] = True
-        else:
-            fp[i] = 1
-
-    cum_tp = np.cumsum(tp)
-    cum_fp = np.cumsum(fp)
-    recall    = cum_tp / len(ground_truths)
-    precision = cum_tp / (cum_tp + cum_fp + 1e-8)
-
-    # Area under PR curve using trapezoidal rule
-    recall    = np.concatenate([[0.0], recall,    [recall[-1]]])
-    precision = np.concatenate([[1.0], precision, [0.0]])
-    ap = np.trapz(precision, recall)
-    return float(ap)
-
-
-def compute_map(
-    all_predictions: Dict[str, List],   # {class_name: [(video, score, start, end), ...]}
-    all_ground_truths: Dict[str, List], # {class_name: [(video, start, end), ...]}
-    iou_thresholds: List[float] = [0.3, 0.4, 0.5, 0.6, 0.7],
+def compute_binary_metrics(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    threshold: float = 0.5,
+    prefix: str = "",
 ) -> Dict[str, float]:
-    """
-    Compute mean Average Precision (mAP) at multiple IoU thresholds.
-    This is the standard THUMOS-14 evaluation protocol.
+    probabilities = torch.sigmoid(logits)
+    predictions = (probabilities >= threshold).float()
+    labels = labels.float()
 
-    Returns a dict like:
-    {
-        "mAP@0.3": 0.52,
-        "mAP@0.5": 0.41,
-        "mAP_avg": 0.44,   # average across all thresholds
+    true_positive = ((predictions == 1) & (labels == 1)).sum().item()
+    false_positive = ((predictions == 1) & (labels == 0)).sum().item()
+    false_negative = ((predictions == 0) & (labels == 1)).sum().item()
+
+    precision = true_positive / max(1.0, true_positive + false_positive)
+    recall = true_positive / max(1.0, true_positive + false_negative)
+    f1 = 0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall)
+
+    return {
+        f"{prefix}binary_accuracy": float((predictions == labels).float().mean().item()),
+        f"{prefix}precision": float(precision),
+        f"{prefix}recall": float(recall),
+        f"{prefix}f1": float(f1),
+        f"{prefix}positive_rate": float(predictions.mean().item()),
     }
-    """
-    results = {}
-    all_aps = []
-
-    for thresh in iou_thresholds:
-        aps = []
-        for cls_name in all_predictions:
-            preds = np.array([
-                [score, start, end]
-                for (_, score, start, end) in all_predictions.get(cls_name, [])
-            ]) if all_predictions.get(cls_name) else np.zeros((0, 3))
-
-            gts = np.array([
-                [start, end]
-                for (_, start, end) in all_ground_truths.get(cls_name, [])
-            ]) if all_ground_truths.get(cls_name) else np.zeros((0, 2))
-
-            ap = compute_ap(preds, gts, thresh)
-            aps.append(ap)
-
-        map_thresh = float(np.mean(aps))
-        results[f"mAP@{thresh}"] = map_thresh
-        all_aps.append(map_thresh)
-
-    results["mAP_avg"] = float(np.mean(all_aps))
-    return results
 
 
-def evaluate_model(model, data_loader, device, iou_thresholds=None):
-    """
-    Run model over a DataLoader and compute mAP.
-    Expects model to output (scores, segments) per clip window.
-    Adapt this to your detection head's output format.
-    """
-    import torch
-    if iou_thresholds is None:
-        iou_thresholds = [0.3, 0.4, 0.5, 0.6, 0.7]
-
+def evaluate_model(
+    model: nn.Module,
+    data_loader: DataLoader,
+    device: torch.device,
+    threshold: float = 0.5,
+) -> Dict[str, float]:
+    criterion = nn.BCEWithLogitsLoss()
     model.eval()
-    all_predictions  = {c: [] for c in THUMOS14_CLASSES}
-    all_ground_truths = {c: [] for c in THUMOS14_CLASSES}
+    total_loss = 0.0
+    all_logits = []
+    all_labels = []
 
     with torch.no_grad():
-        for features, labels, meta in data_loader:
+        for features, labels in data_loader:
             features = features.to(device)
-            # model output expected: list of dicts with keys
-            # "scores" (C,), "segments" [(start, end), ...], "video_name"
-            outputs = model(features)
+            labels = labels.to(device)
+            logits = model(features)
+            total_loss += criterion(logits, labels).item()
+            all_logits.append(logits.detach().cpu())
+            all_labels.append(labels.detach().cpu())
 
-            for out, lbl, m in zip(outputs, labels, meta):
-                video_name = m["video_name"]
-                for cls_idx, cls_name in enumerate(THUMOS14_CLASSES):
-                    # Accumulate predictions
-                    for score, (start, end) in zip(
-                        out["scores"][cls_idx], out["segments"]
-                    ):
-                        all_predictions[cls_name].append(
-                            (video_name, float(score), float(start), float(end))
-                        )
-                    # Accumulate ground truths from label tensor
-                    gt_clips = (lbl[:, cls_idx] > 0).nonzero(as_tuple=True)[0]
-                    if len(gt_clips) > 0:
-                        all_ground_truths[cls_name].append(
-                            (video_name, float(gt_clips[0]), float(gt_clips[-1]))
-                        )
+    metrics = compute_binary_metrics(
+        torch.cat(all_logits, dim=0),
+        torch.cat(all_labels, dim=0),
+        threshold=threshold,
+    )
+    metrics["val_loss"] = total_loss / max(1, len(data_loader))
+    return metrics
 
-    from src.dataset import THUMOS14_CLASSES  # avoid circular if needed
-    return compute_map(all_predictions, all_ground_truths, iou_thresholds)
+
+def evaluate_checkpoint(
+    config: dict,
+    checkpoint_path: str,
+    split_indices_path: str,
+    output_path: str | None = None,
+) -> Dict[str, float]:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    artifact_dir = config["paths"].get("artifact_dir", config["paths"]["log_dir"])
+    threshold = config.get("reporting", {}).get("threshold", 0.5)
+
+    dataset = THUMOSFeatureDataset(
+        feature_dir=config["paths"]["feature_dir"],
+        ann_path=os.path.join(config["paths"]["data_root"], "annotations", "thumos14.json"),
+        window_size=config["data"].get("window_size", 128),
+        stride=config["data"].get("stride", 64),
+    )
+
+    with open(split_indices_path, "r", encoding="utf-8") as f:
+        split_indices = json.load(f)
+    val_dataset = Subset(dataset, split_indices["val_indices"])
+
+    batch_size = config["data"].get(
+        "batch_size",
+        config.get("training", {}).get("batch_size", 8),
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=config["data"]["num_workers"],
+        pin_memory=True,
+    )
+
+    sample_features, _ = dataset[0]
+    model = TemporalDetectionHead(
+        feature_dim=sample_features.shape[-1],
+        num_classes=config["model"]["num_classes"],
+    ).to(device)
+    load_checkpoint(checkpoint_path, model)
+
+    summary = evaluate_model(model, val_loader, device, threshold=threshold)
+    summary.update(
+        {
+            "checkpoint_path": checkpoint_path,
+            "split_indices_path": split_indices_path,
+            "num_validation_windows": len(val_dataset),
+            "artifact_dir": artifact_dir,
+        }
+    )
+
+    if output_path:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+
+    return summary

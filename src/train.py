@@ -1,11 +1,73 @@
+import csv
+import json
 import os
+
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from src.utils import get_logger, save_checkpoint, load_checkpoint
+from src.evaluate import compute_binary_metrics
+from src.utils import get_logger, save_checkpoint
+
+
+def _write_json(path: str, payload: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
+def _write_history_csv(path: str, history: list[dict]) -> None:
+    if not history:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fieldnames = list(history[0].keys())
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(history)
+
+
+def _make_split_indices(dataset_size: int, val_fraction: float, seed: int) -> tuple[list[int], list[int]]:
+    generator = torch.Generator().manual_seed(seed)
+    indices = torch.randperm(dataset_size, generator=generator).tolist()
+    val_size = max(1, int(val_fraction * dataset_size))
+    val_indices = indices[:val_size]
+    train_indices = indices[val_size:]
+    if not train_indices:
+        train_indices = val_indices
+    return train_indices, val_indices
+
+
+def _evaluate_epoch(
+    model: nn.Module,
+    data_loader: DataLoader,
+    criterion: nn.Module,
+    device: torch.device,
+    threshold: float,
+) -> dict:
+    model.eval()
+    total_loss = 0.0
+    all_logits = []
+    all_labels = []
+
+    with torch.no_grad():
+        for feats, labels in data_loader:
+            feats, labels = feats.to(device), labels.to(device)
+            logits = model(feats)
+            total_loss += criterion(logits, labels).item()
+            all_logits.append(logits.detach().cpu())
+            all_labels.append(labels.detach().cpu())
+
+    metrics = compute_binary_metrics(
+        torch.cat(all_logits, dim=0),
+        torch.cat(all_labels, dim=0),
+        threshold=threshold,
+        prefix="val_",
+    )
+    metrics["val_loss"] = total_loss / max(1, len(data_loader))
+    return metrics
 
 
 def train(config: dict):
@@ -14,6 +76,18 @@ def train(config: dict):
     logger.info(f"Training on: {device}")
 
     use_features = config.get("use_features", True)
+    artifact_dir = config["paths"].get("artifact_dir", config["paths"]["log_dir"])
+    batch_size = config["data"].get(
+        "batch_size",
+        config.get("training", {}).get("batch_size", 8),
+    )
+    split_seed = config.get("training", {}).get("seed", 42)
+    val_fraction = config.get("training", {}).get("val_fraction", 0.1)
+    threshold = config.get("reporting", {}).get("threshold", 0.5)
+    primary_metric = config.get("reporting", {}).get("primary_metric", "val_f1")
+
+    os.makedirs(config["paths"]["checkpoint_dir"], exist_ok=True)
+    os.makedirs(artifact_dir, exist_ok=True)
 
     # --- Dataset ---
     if use_features:
@@ -55,20 +129,30 @@ def train(config: dict):
         ).to(device)
 
     # --- Split ---
-    val_size   = int(0.1 * len(dataset))
-    train_size = len(dataset) - val_size
-    train_ds, val_ds = random_split(dataset, [train_size, val_size])
+    train_indices, val_indices = _make_split_indices(len(dataset), val_fraction, split_seed)
+    train_ds = Subset(dataset, train_indices)
+    val_ds = Subset(dataset, val_indices)
+
+    _write_json(
+        os.path.join(artifact_dir, "split_indices.json"),
+        {
+            "seed": split_seed,
+            "val_fraction": val_fraction,
+            "train_indices": train_indices,
+            "val_indices": val_indices,
+        },
+    )
 
     train_loader = DataLoader(
         train_ds,
-        batch_size=config["training"]["batch_size"],
+        batch_size=batch_size,
         shuffle=True,
         num_workers=config["data"]["num_workers"],
         pin_memory=True,
     )
     val_loader = DataLoader(
         val_ds,
-        batch_size=config["training"]["batch_size"],
+        batch_size=batch_size,
         shuffle=False,
         num_workers=config["data"]["num_workers"],
         pin_memory=True,
@@ -83,7 +167,8 @@ def train(config: dict):
     scheduler = CosineAnnealingLR(optimizer, T_max=config["training"]["epochs"])
     criterion = nn.BCEWithLogitsLoss()   # Multi-label for temporal detection
 
-    best_map = 0.0
+    best_metric = float("-inf")
+    history = []
 
     for epoch in range(config["training"]["epochs"]):
         # --- Train ---
@@ -105,23 +190,51 @@ def train(config: dict):
         avg_loss = running_loss / len(train_loader)
 
         # --- Validate ---
-        model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            for feats, labels in val_loader:
-                feats, labels = feats.to(device), labels.to(device)
-                logits   = model(feats)
-                val_loss += criterion(logits, labels).item()
-        val_loss /= len(val_loader)
-        logger.info(f"Epoch {epoch} | Train Loss: {avg_loss:.4f} | Val Loss: {val_loss:.4f}")
+        val_metrics = _evaluate_epoch(model, val_loader, criterion, device, threshold)
+        epoch_metrics = {
+            "epoch": epoch,
+            "train_loss": float(avg_loss),
+            **val_metrics,
+        }
+        history.append(epoch_metrics)
+        logger.info(
+            "Epoch %s | Train Loss: %.4f | Val Loss: %.4f | Val Acc: %.4f | Val F1: %.4f",
+            epoch,
+            avg_loss,
+            val_metrics["val_loss"],
+            val_metrics["val_binary_accuracy"],
+            val_metrics["val_f1"],
+        )
+
+        _write_json(
+            os.path.join(artifact_dir, "training_history.json"),
+            {"history": history},
+        )
+        _write_history_csv(
+            os.path.join(artifact_dir, "training_history.csv"),
+            history,
+        )
 
         # Save checkpoint every epoch; keep best separately
         ckpt_path = os.path.join(config["paths"]["checkpoint_dir"], f"epoch_{epoch}.pt")
-        save_checkpoint(ckpt_path, model, optimizer, epoch, {"val_loss": val_loss})
+        save_checkpoint(ckpt_path, model, optimizer, epoch, epoch_metrics)
 
-        if val_loss < best_map:   # Swap for mAP once evaluate_model is wired in
-            best_map = val_loss
+        current_metric = epoch_metrics.get(primary_metric, epoch_metrics["val_f1"])
+        if current_metric > best_metric:
+            best_metric = current_metric
             save_checkpoint(
                 os.path.join(config["paths"]["checkpoint_dir"], "best.pt"),
-                model, optimizer, epoch, {"val_loss": val_loss},
+                model, optimizer, epoch, epoch_metrics,
             )
+
+    summary = {
+        "best_metric_name": primary_metric,
+        "best_metric_value": best_metric,
+        "epochs": config["training"]["epochs"],
+        "history_path": os.path.join(artifact_dir, "training_history.json"),
+        "split_path": os.path.join(artifact_dir, "split_indices.json"),
+        "checkpoint_path": os.path.join(config["paths"]["checkpoint_dir"], "best.pt"),
+        "final_epoch": history[-1] if history else {},
+    }
+    _write_json(os.path.join(artifact_dir, "training_summary.json"), summary)
+    return summary

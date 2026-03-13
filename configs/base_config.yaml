@@ -1,5 +1,5 @@
 model:
-  backbone: "video_swin_tiny"   # or "x3d_m", "timesformer", etc.
+  backbone: "videomae_base"     # or "x3d_m" for the lighter baseline
   num_classes: 20               # THUMOS-14 has 20 action classes
   pretrained: true
 
@@ -8,6 +8,11 @@ data:
   frame_interval: 4
   num_workers: 4
   batch_size: 8
+  clip_len_sec: 2.0
+  stride_sec: 1.0
+  num_frames: 16
+  window_size: 128
+  stride: 64
 
 training:
   epochs: 30
@@ -15,9 +20,16 @@ training:
   weight_decay: 1e-4
   lr_scheduler: "cosine"
   warmup_epochs: 5
+  seed: 42
+  val_fraction: 0.1
+
+reporting:
+  threshold: 0.5
+  primary_metric: "val_f1"
 
 paths:
   # These are paths *inside* the Modal Volume
   data_root: "/data/thumos"
   checkpoint_dir: "/checkpoints"
   log_dir: "/logs"
+  artifact_dir: "/artifacts"
