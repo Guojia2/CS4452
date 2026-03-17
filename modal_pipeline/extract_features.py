@@ -1,21 +1,27 @@
 import modal
 import os
 import torch
-from modal_pipeline.app import app, image, volume, VOLUME_MOUNT_PATH
 
-GPU = modal.gpu.A10G()   # Feature extraction benefits from a strong GPU
+# --- Inline definitions (no import from modal_pipeline.app) ---
+app = modal.App("thumos-action-recognition")
+volume = modal.Volume.from_name("thumos-vol", create_if_missing=True)
+VOLUME_MOUNT_PATH = "/vol"
 
+image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .pip_install_from_requirements("requirements.txt")
+    .apt_install("ffmpeg")
+    .add_local_dir("src", remote_path="/root/src")
+    .add_local_dir("configs", remote_path="/root/configs")
+)
+
+GPU = "A100"
 
 @app.function(
     image=image,
     gpu=GPU,
     volumes={VOLUME_MOUNT_PATH: volume},
-    timeout=60 * 60 * 24,   # 24 hours — 200GB of video takes a while
-    mounts=[
-        modal.Mount.from_local_dir("src",     remote_path="/root/src"),
-        modal.Mount.from_local_dir("configs", remote_path="/root/configs"),
-    ],
-    # Retry once on preemption — useful for long jobs
+    timeout=60 * 60 * 24,
     retries=1,
 )
 def extract_features(
@@ -23,11 +29,11 @@ def extract_features(
     clip_len_sec:  float = 2.0,
     stride_sec:    float = 1.0,
     num_frames:    int   = 16,
-    batch_size:    int   = 16,
+    batch_size:    int   = 32,
 ):
     import sys
     sys.path.insert(0, "/root")
-
+    volume.reload()
     import yaml
     from torch.utils.data import DataLoader
     from src.dataset import THUMOSVideoDataset
@@ -56,6 +62,12 @@ def extract_features(
         stride_sec=stride_sec,
         num_frames=num_frames,
     )
+    logger.info(f"video_dir: {video_dir}")
+    logger.info(f"ann_path: {ann_path}")
+    logger.info(f"ann_path exists: {os.path.exists(ann_path)}")
+    logger.info(f"video_dir exists: {os.path.exists(video_dir)}")
+    logger.info(f"Files in video_dir: {len(os.listdir(video_dir)) if os.path.exists(video_dir) else 'DIR NOT FOUND'}")
+    logger.info(f"Total clips: {len(dataset)}")
     loader = DataLoader(
         dataset,
         batch_size=batch_size,

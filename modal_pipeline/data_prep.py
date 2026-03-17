@@ -4,6 +4,19 @@ from modal_pipeline.app import app, image, volume, VOLUME_MOUNT_PATH
 
 download_image = image.pip_install("gdown")
 
+app = modal.App("thumos-action-recognition")
+volume = modal.Volume.from_name("thumos-vol", create_if_missing=True)
+VOLUME_MOUNT_PATH = "/vol"
+
+download_image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .apt_install("rclone")
+)
+
+# Store your rclone config as a Modal secret
+# We'll set this up in a moment
+rclone_secret = modal.Secret.from_name("rclone-config")
+
 @app.function(
     image=download_image,
     volumes={VOLUME_MOUNT_PATH: volume},

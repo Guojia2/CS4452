@@ -55,14 +55,10 @@ def decode_video_frames(
     start_sec: float,
     end_sec: float,
     num_frames: int,
+    target_size: int = 224,
 ) -> torch.Tensor:
-    """
-    Decode `num_frames` evenly-spaced frames from [start_sec, end_sec].
-    Returns a tensor of shape (C, T, H, W) in float32, normalized to [0, 1].
-    """
     container = av.open(video_path)
     stream = container.streams.video[0]
-    fps = float(stream.average_rate)
     duration = float(stream.duration * stream.time_base)
 
     start_sec = max(0.0, start_sec)
@@ -81,11 +77,24 @@ def decode_video_frames(
 
     container.close()
 
-    # Stack → (T, H, W, C) → (C, T, H, W)
+    # Stack → (T, H, W, C)
     frames = np.stack(frames, axis=0).astype(np.float32) / 255.0
-    frames = torch.from_numpy(frames).permute(3, 0, 1, 2)
-    return frames
+    frames = torch.from_numpy(frames).permute(3, 0, 1, 2)  # (C, T, H, W)
 
+    # Resize spatial dimensions to target_size x target_size
+    import torch.nn.functional as F
+    # interpolate expects (N, C, H, W) so we reshape
+    C, T, H, W = frames.shape
+    frames = frames.permute(1, 0, 2, 3)          # (T, C, H, W)
+    frames = F.interpolate(
+        frames,
+        size=(target_size, target_size),
+        mode="bilinear",
+        align_corners=False,
+    )                                              # (T, C, 224, 224)
+    frames = frames.permute(1, 0, 2, 3)           # (C, T, 224, 224)
+
+    return frames
 
 class THUMOSVideoDataset(Dataset):
     """
