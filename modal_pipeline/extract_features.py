@@ -49,16 +49,15 @@ def extract_features(
     backbone = backbone.to(device).eval()
 
     # --- Dataset ---
-    video_dir  = os.path.join(VOLUME_MOUNT_PATH, "raw", "videos", "val")
-    ann_path   = os.path.join(VOLUME_MOUNT_PATH, "raw", "annotations", "thumos_14_anno.json")
+    video_dir  = os.path.join(VOLUME_MOUNT_PATH, "raw", "videos")
+    ann_path = os.path.join(VOLUME_MOUNT_PATH, "raw", "annotations", "annotations", "thumos_14_anno.json")
     feat_dir   = os.path.join(VOLUME_MOUNT_PATH, "features", "clip_level")
     os.makedirs(feat_dir, exist_ok=True)
 
     dataset = THUMOSVideoDataset(
         video_dir=video_dir,
         ann_path=ann_path,
-        subset="training",      # add this
-
+        subset="training",     
         clip_len_sec=clip_len_sec,
         stride_sec=stride_sec,
         num_frames=num_frames,
