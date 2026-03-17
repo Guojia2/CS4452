@@ -13,9 +13,9 @@ def download_from_gdrive():
     import gdown
 
     splits = {
-        "raw/videos/val":  "https://drive.google.com/drive/folders/<val_folder_id>",
-        "raw/videos/test": "https://drive.google.com/drive/folders/<test_folder_id>",
-        "raw/annotations": "https://drive.google.com/drive/folders/<annotations_folder_id>",
+        "raw/videos/val":  "https://drive.google.com/drive/folders/1s-vldTTvgF0Dn8x3aoMuB7UkMVkv5NNU",
+        "raw/videos/test": "https://drive.google.com/drive/folders/13JbXBoKJu8Me8jjAR0mCdvADLZbs-1LM>",
+        "raw/annotations": "https://drive.google.com/drive/folders/1K8l4CzxBVgo9Y6u2Iu0YbKAa2IShnzjo",
     }
 
     for dest_subpath, url in splits.items():
