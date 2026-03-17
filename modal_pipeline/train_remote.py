@@ -1,5 +1,4 @@
 import modal
-from modal_pipeline.app import app, image, volume, VOLUME_MOUNT_PATH
 import yaml
 import os
 
@@ -17,7 +16,7 @@ image = (
     .add_local_dir("configs", remote_path="/root/configs")
 )
 
-GPU = modal.gpu.A10G()
+GPU = "A100"
 
 @app.function(
     image=image,

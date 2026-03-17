@@ -1,5 +1,5 @@
 model:
-  backbone: "video_swin_tiny"   # or "x3d_m", "timesformer", etc.
+  backbone: "x3d_m"   # or "x3d_m", "timesformer", etc.
   num_classes: 20               # THUMOS-14 has 20 action classes
   pretrained: true
 

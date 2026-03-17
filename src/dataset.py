@@ -11,7 +11,7 @@ from typing import Tuple, List, Dict, Optional
 # Annotation loading
 # ---------------------------------------------------------------------------
 
-def load_thumos_annotations(ann_path: str) -> Dict:
+def load_thumos_annotations(ann_path: str, subset: str = None) -> Dict:
     """
     Load THUMOS-14 annotations.
     Expects a JSON with structure:
@@ -25,8 +25,15 @@ def load_thumos_annotations(ann_path: str) -> Dict:
     them to this JSON format with a one-time script for convenience.
     """
     with open(ann_path) as f:
-        return json.load(f)
-
+        data = json.load(f)
+    database = data["database"]
+    if subset is not None:
+        database = {
+            k: v for k, v in database.items()
+            if v.get("subset") == subset
+        }
+    return database
+ 
 
 # ---------------------------------------------------------------------------
 # Label map — THUMOS-14 classes
@@ -51,14 +58,10 @@ def decode_video_frames(
     start_sec: float,
     end_sec: float,
     num_frames: int,
+    target_size: int = 224,
 ) -> torch.Tensor:
-    """
-    Decode `num_frames` evenly-spaced frames from [start_sec, end_sec].
-    Returns a tensor of shape (C, T, H, W) in float32, normalized to [0, 1].
-    """
     container = av.open(video_path)
     stream = container.streams.video[0]
-    fps = float(stream.average_rate)
     duration = float(stream.duration * stream.time_base)
 
     start_sec = max(0.0, start_sec)
@@ -77,11 +80,24 @@ def decode_video_frames(
 
     container.close()
 
-    # Stack → (T, H, W, C) → (C, T, H, W)
+    # Stack → (T, H, W, C)
     frames = np.stack(frames, axis=0).astype(np.float32) / 255.0
-    frames = torch.from_numpy(frames).permute(3, 0, 1, 2)
-    return frames
+    frames = torch.from_numpy(frames).permute(3, 0, 1, 2)  # (C, T, H, W)
 
+    # Resize spatial dimensions to target_size x target_size
+    import torch.nn.functional as F
+    # interpolate expects (N, C, H, W) so we reshape
+    C, T, H, W = frames.shape
+    frames = frames.permute(1, 0, 2, 3)          # (T, C, H, W)
+    frames = F.interpolate(
+        frames,
+        size=(target_size, target_size),
+        mode="bilinear",
+        align_corners=False,
+    )                                              # (T, C, 224, 224)
+    frames = frames.permute(1, 0, 2, 3)           # (C, T, 224, 224)
+
+    return frames
 
 class THUMOSVideoDataset(Dataset):
     """
@@ -96,6 +112,7 @@ class THUMOSVideoDataset(Dataset):
         clip_len_sec: float = 2.0,
         stride_sec: float = 1.0,
         num_frames: int = 16,
+        subset: str = "training",
         transform=None,
     ):
         self.video_dir    = video_dir
@@ -104,7 +121,7 @@ class THUMOSVideoDataset(Dataset):
         self.num_frames   = num_frames
         self.transform    = transform
 
-        annotations = load_thumos_annotations(ann_path)
+        annotations = load_thumos_annotations(ann_path, subset=subset)
         self.clips: List[Tuple] = []
 
         for video_name, meta in annotations.items():

@@ -49,7 +49,7 @@ def extract_features(
     backbone = backbone.to(device).eval()
 
     # --- Dataset ---
-    video_dir  = os.path.join(VOLUME_MOUNT_PATH, "raw", "videos, val")
+    video_dir  = os.path.join(VOLUME_MOUNT_PATH, "raw", "videos", "val")
     ann_path   = os.path.join(VOLUME_MOUNT_PATH, "raw", "annotations", "thumos_14_anno.json")
     feat_dir   = os.path.join(VOLUME_MOUNT_PATH, "features", "clip_level")
     os.makedirs(feat_dir, exist_ok=True)
@@ -57,10 +57,18 @@ def extract_features(
     dataset = THUMOSVideoDataset(
         video_dir=video_dir,
         ann_path=ann_path,
+        subset="training",      # add this
+
         clip_len_sec=clip_len_sec,
         stride_sec=stride_sec,
         num_frames=num_frames,
     )
+    logger.info(f"video_dir: {video_dir}")
+    logger.info(f"ann_path: {ann_path}")
+    logger.info(f"ann_path exists: {os.path.exists(ann_path)}")
+    logger.info(f"video_dir exists: {os.path.exists(video_dir)}")
+    logger.info(f"Files in video_dir: {len(os.listdir(video_dir)) if os.path.exists(video_dir) else 'DIR NOT FOUND'}")
+    logger.info(f"Total clips: {len(dataset)}")
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
