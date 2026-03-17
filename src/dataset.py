@@ -11,21 +11,25 @@ from typing import Tuple, List, Dict, Optional
 # Annotation loading
 # ---------------------------------------------------------------------------
 
-def load_thumos_annotations(ann_path: str) -> Dict:
+def load_thumos_annotations(ann_path: str, subset: str = None) -> Dict:
     """
-    Load THUMOS-14 annotations.
-    Expects a JSON with structure:
-    {
-      "video_name": {
-        "duration": float,
-        "annotations": [{"label": str, "segment": [start, end]}, ...]
-      }
-    }
-    The official THUMOS annotations are in CSV; it's worth pre-converting
-    them to this JSON format with a one-time script for convenience.
+    Loads thumos_14_anno.json from OpenTAD.
+    Optionally filter by subset: "training", "validation", or "test".
+    Note: THUMOS14 calls the training split "training" in this file,
+    which corresponds to the validation videos (val folder) on disk.
     """
     with open(ann_path) as f:
-        return json.load(f)
+        data = json.load(f)
+
+    database = data["database"]
+
+    if subset is not None:
+        database = {
+            k: v for k, v in database.items()
+            if v.get("subset") == subset
+        }
+
+    return database
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +100,8 @@ class THUMOSVideoDataset(Dataset):
         clip_len_sec: float = 2.0,
         stride_sec: float = 1.0,
         num_frames: int = 16,
+        subset: str = "training",   # add this
+
         transform=None,
     ):
         self.video_dir    = video_dir
@@ -104,7 +110,7 @@ class THUMOSVideoDataset(Dataset):
         self.num_frames   = num_frames
         self.transform    = transform
 
-        annotations = load_thumos_annotations(ann_path)
+        annotations = load_thumos_annotations(ann_path, subset = subset)
         self.clips: List[Tuple] = []
 
         for video_name, meta in annotations.items():
@@ -151,13 +157,15 @@ class THUMOSFeatureDataset(Dataset):
         ann_path: str,
         window_size: int = 128,   # number of clips per training sample
         stride: int = 64,
+        subset: str = "training",   
+
         split: str = "val",       # THUMOS uses "val" for training TAD models
     ):
         self.feature_dir = feature_dir
         self.window_size = window_size
         self.stride      = stride
 
-        annotations = load_thumos_annotations(ann_path)
+        annotations = load_thumos_annotations(ann_path, subset = subset)
         self.samples: List[Dict] = []
 
         for video_name, meta in annotations.items():

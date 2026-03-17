@@ -21,8 +21,9 @@ def train(config: dict):
         dataset = THUMOSFeatureDataset(
             feature_dir=config["paths"]["feature_dir"],
             ann_path=os.path.join(
-                config["paths"]["data_root"], "annotations", "thumos14.json"
-            ),
+                config["paths"]["data_root"], "annotations", "annotations", "thumos_14_anno.json"
+                )
+,
             window_size=config["data"].get("window_size", 128),
             stride=config["data"].get("stride", 64),
         )
@@ -42,8 +43,9 @@ def train(config: dict):
         dataset = THUMOSVideoDataset(
             video_dir=os.path.join(config["paths"]["data_root"], "videos"),
             ann_path=os.path.join(
-                config["paths"]["data_root"], "annotations", "thumos14.json"
-            ),
+                config["paths"]["data_root"], "annotations", "annotations", "thumos_14_anno.json"
+                )
+,
             clip_len_sec=config["data"].get("clip_len_sec", 2.0),
             stride_sec=config["data"].get("stride_sec", 1.0),
             num_frames=config["data"].get("num_frames", 16),

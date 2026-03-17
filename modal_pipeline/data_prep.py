@@ -1,26 +1,32 @@
 import modal
-from modal_pipeline.app import app, image, volume, VOLUME_MOUNT_PATH
 import os
+from modal_pipeline.app import app, image, volume, VOLUME_MOUNT_PATH
+
+download_image = image.pip_install("gdown")
 
 @app.function(
-    image=image,
+    image=download_image,
     volumes={VOLUME_MOUNT_PATH: volume},
-    timeout=3600,  # 1 hour — uploading video data takes time
+    timeout=60 * 60 * 12,
 )
-def upload_dataset(local_data_path: str):
-    """
-    Call this locally once to push your THUMOS data into the Modal Volume.
-    Usage:  modal run modal_pipeline/data_prep.py
-    """
-    import shutil
-    dest = os.path.join(VOLUME_MOUNT_PATH, "thumos")
-    print(f"Copying data to {dest}...")
-    shutil.copytree(local_data_path, dest, dirs_exist_ok=True)
-    volume.commit()  # Flush writes to the Volume
-    print("Done.")
+def download_from_gdrive():
+    import gdown
 
+    splits = {
+        "raw/videos/val":  "https://drive.google.com/drive/folders/1s-vldTTvgF0Dn8x3aoMuB7UkMVkv5NNU",
+        "raw/videos/test": "https://drive.google.com/drive/folders/13JbXBoKJu8Me8jjAR0mCdvADLZbs-1LM",
+        "raw/annotations": "https://drive.google.com/drive/folders/1K8l4CzxBVgo9Y6u2Iu0YbKAa2IShnzjo",
+    }
+
+    for dest_subpath, url in splits.items():
+        dest = os.path.join(VOLUME_MOUNT_PATH, dest_subpath)
+        os.makedirs(dest, exist_ok=True)
+        print(f"Downloading {dest_subpath}...")
+        gdown.download_folder(url=url, output=dest, quiet=False, resume=True)
+
+    volume.commit()
+    print("All done — data committed to Modal Volume.")
 
 @app.local_entrypoint()
 def main():
-    # Change this to wherever your THUMOS data lives locally
-    upload_dataset.remote("/path/to/local/thumos")
+    download_from_gdrive.remote()
