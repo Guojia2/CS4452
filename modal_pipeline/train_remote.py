@@ -3,18 +3,28 @@ from modal_pipeline.app import app, image, volume, VOLUME_MOUNT_PATH
 import yaml
 import os
 
-GPU = modal.gpu.A10G()
 
+# --- Inline definitions (no import from modal_pipeline.app) ---
+app = modal.App("thumos-action-recognition")
+volume = modal.Volume.from_name("thumos-vol", create_if_missing=True)
+VOLUME_MOUNT_PATH = "/vol"
+
+image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .pip_install_from_requirements("requirements.txt")
+    .apt_install("ffmpeg")
+    .add_local_dir("src", remote_path="/root/src")
+    .add_local_dir("configs", remote_path="/root/configs")
+)
+
+GPU = modal.gpu.A10G()
 
 @app.function(
     image=image,
     gpu=GPU,
     volumes={VOLUME_MOUNT_PATH: volume},
-    timeout=60 * 60 * 12,
-    mounts=[
-        modal.Mount.from_local_dir("src",     remote_path="/root/src"),
-        modal.Mount.from_local_dir("configs", remote_path="/root/configs"),
-    ],
+    timeout=60 * 60 * 24,
+    retries=1,
 )
 def run_training(
     config_path: str = "configs/base_config.yaml",

@@ -1,33 +1,36 @@
 import torch
 import torch.nn as nn
-import pytorchvideo.models as pv_models
 
 
-def build_backbone(backbone_name: str, pretrained: bool = True) -> nn.Module:
-    """
-    Returns a video backbone. Add more options here as needed.
-    """
+def build_backbone(backbone_name: str, pretrained: bool = True):
     if backbone_name == "x3d_m":
-        model = pv_models.x3d.create_x3d(
+        from pytorchvideo.models.x3d import create_x3d
+        model = create_x3d(
             input_clip_length=16,
             input_crop_size=224,
-            model_num_class=400,  # Kinetics pre-trained output size
-            pretrained=pretrained,
+            model_num_class=400,
         )
+        if pretrained:
+            # Load Kinetics-400 pretrained weights via torch hub
+            pretrained_model = torch.hub.load(
+                "facebookresearch/pytorchvideo",
+                "x3d_m",
+                pretrained=True,
+            )
+            # Copy weights from the pretrained model, ignoring the head
+            state_dict = pretrained_model.state_dict()
+            model.load_state_dict(state_dict, strict=False)
+
         # Strip the classification head so we get features out
         feature_dim = model.blocks[-1].proj.in_features
         model.blocks[-1].proj = nn.Identity()
         return model, feature_dim
-
     elif backbone_name == "video_swin_tiny":
-        # pytorchvideo wraps Swin as well; alternatively use the
-        # official Video Swin repo or timm
         raise NotImplementedError(
             "Wire in Video Swin from the official repo or timm here."
         )
     else:
         raise ValueError(f"Unknown backbone: {backbone_name}")
-
 
 class ActionRecognitionModel(nn.Module):
     def __init__(self, backbone_name: str, num_classes: int, pretrained: bool = True):
