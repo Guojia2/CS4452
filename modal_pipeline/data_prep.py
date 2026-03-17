@@ -14,7 +14,7 @@ def download_from_gdrive():
 
     splits = {
         "raw/videos/val":  "https://drive.google.com/drive/folders/1s-vldTTvgF0Dn8x3aoMuB7UkMVkv5NNU",
-        "raw/videos/test": "https://drive.google.com/drive/folders/13JbXBoKJu8Me8jjAR0mCdvADLZbs-1LM>",
+        "raw/videos/test": "https://drive.google.com/drive/folders/13JbXBoKJu8Me8jjAR0mCdvADLZbs-1LM",
         "raw/annotations": "https://drive.google.com/drive/folders/1K8l4CzxBVgo9Y6u2Iu0YbKAa2IShnzjo",
     }
 
