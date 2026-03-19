@@ -1,15 +1,32 @@
-import os
+
+from __future__ import annotations
+
 import json
+from typing import Callable, Dict, List, Optional, Tuple
+
 import torch
-import numpy as np
-import av  # PyAV for video decoding
 from torch.utils.data import Dataset
-from typing import Tuple, List, Dict, Optional
+import torchvision.transforms as T
+from pytorchvideo.data.encoded_video import EncodedVideo
+from pytorchvideo.data.functional import decode_video_frames as pytorchvideo_decode
+from torchvision.io import read_video
+from PIL import Image
 
 
 # ---------------------------------------------------------------------------
-# Annotation loading
+# Transform factory
 # ---------------------------------------------------------------------------
+
+def build_transforms(img_size: int = 224) -> T.Compose:
+    mean = [0.485, 0.456, 0.406]
+    std = [0.229, 0.224, 0.225]
+
+    return T.Compose([
+        T.Resize(int(img_size * 256 / 224)),
+        T.CenterCrop(img_size),
+        T.ToTensor(),
+        T.Normalize(mean=mean, std=std),
+    ])
 
 def load_thumos_annotations(ann_path: str, subset: str = None) -> Dict:
     """
@@ -55,100 +72,85 @@ def decode_video_frames(
     start_sec: float,
     end_sec: float,
     num_frames: int,
-    target_size: int = 224,
-) -> torch.Tensor:
-    container = av.open(video_path)
-    stream = container.streams.video[0]
-    duration = float(stream.duration * stream.time_base)
+) -> List[Image.Image]:
+    frames, _, _ = read_video(
+        video_path,
+        start_pts=start_sec,
+        end_pts=end_sec,
+        pts_unit="sec",
+    )  # (T, H, W, C)
 
-    start_sec = max(0.0, start_sec)
-    end_sec   = min(duration, end_sec)
+    if frames.shape[0] == 0:
+        raise ValueError(
+            f"No frames decoded from {video_path} between {start_sec:.2f}s and {end_sec:.2f}s"
+        )
 
-    timestamps = np.linspace(start_sec, end_sec, num_frames)
-    target_pts = [int(t / stream.time_base) for t in timestamps]
+    if frames.shape[0] == 1:
+        indices = torch.zeros(num_frames, dtype=torch.long)
+    else:
+        indices = torch.linspace(0, frames.shape[0] - 1, steps=num_frames).long()
 
-    frames = []
-    for pts in target_pts:
-        container.seek(pts, stream=stream)
-        for frame in container.decode(stream):
-            img = frame.to_ndarray(format="rgb24")  # (H, W, C)
-            frames.append(img)
-            break
+    sampled = frames[indices]  # (num_frames, H, W, C)
 
-    container.close()
+    return [Image.fromarray(frame.numpy()) for frame in sampled]
 
-    # Stack → (T, H, W, C)
-    frames = np.stack(frames, axis=0).astype(np.float32) / 255.0
-    frames = torch.from_numpy(frames).permute(3, 0, 1, 2)  # (C, T, H, W)
-
-    # Resize spatial dimensions to target_size x target_size
-    import torch.nn.functional as F
-    # interpolate expects (N, C, H, W) so we reshape
-    C, T, H, W = frames.shape
-    frames = frames.permute(1, 0, 2, 3)          # (T, C, H, W)
-    frames = F.interpolate(
-        frames,
-        size=(target_size, target_size),
-        mode="bilinear",
-        align_corners=False,
-    )                                              # (T, C, 224, 224)
-    frames = frames.permute(1, 0, 2, 3)           # (C, T, 224, 224)
-
-    return frames
 
 class THUMOSVideoDataset(Dataset):
-    """
-    Iterates over sliding-window clips of each video for feature extraction.
-    Each item is (clip_tensor, video_name, window_start_sec, window_end_sec).
-    """
-
     def __init__(
         self,
         video_dir: str,
         ann_path: str,
+        subset: str = "training",
         clip_len_sec: float = 2.0,
         stride_sec: float = 1.0,
         num_frames: int = 16,
-        subset: str = "training",   # add this
-
-        transform=None,
-    ):
-        self.video_dir    = video_dir
+        transform: Optional[Callable] = None,
+        img_size: int = 224,
+    ) -> None:
+        self.video_dir = video_dir
+        self.ann_path = ann_path
+        self.subset = subset
         self.clip_len_sec = clip_len_sec
-        self.stride_sec   = stride_sec
-        self.num_frames   = num_frames
-        self.transform    = transform
+        self.stride_sec = stride_sec
+        self.num_frames = num_frames
+        self.transform = transform or build_transforms(img_size=img_size)
 
-        annotations = load_thumos_annotations(ann_path, subset = subset)
-        self.clips: List[Tuple] = []
+        self.annotations = load_thumos_annotations(ann_path, subset=subset)
+        self.clips: List[Tuple[str, float, float]] = self._build_clip_index()
 
-        for video_name, meta in annotations.items():
-            video_path = os.path.join(video_dir, f"{video_name}.mp4")
-            if not os.path.exists(video_path):
-                # Try .avi as THUMOS has mixed formats
-                video_path = video_path.replace(".mp4", ".avi")
-            if not os.path.exists(video_path):
-                continue
+    def _build_clip_index(self) -> List[Tuple[str, float, float]]:
+        clips: List[Tuple[str, float, float]] = []
 
+        for video_name, meta in self.annotations.items():
             duration = meta["duration"]
             start = 0.0
-            while start + clip_len_sec <= duration:
-                self.clips.append((video_path, video_name, start, start + clip_len_sec))
-                start += stride_sec
 
-    def __len__(self):
+            while start + self.clip_len_sec <= duration:
+                end = start + self.clip_len_sec
+                clips.append((video_name, start, end))
+                start += self.stride_sec
+
+        return clips
+    
+    def __len__(self) -> int:
         return len(self.clips)
+    
+    def __getitem__(self, idx: int):
+        video_name, start, end = self.clips[idx]
+        video_path = os.path.join(self.video_dir, f"{video_name}.mp4")
 
-    def __getitem__(self, idx):
-        video_path, video_name, start, end = self.clips[idx]
-        clip = decode_video_frames(video_path, start, end, self.num_frames)
+        frames = decode_video_frames(video_path, start, end, self.num_frames)
+
         if self.transform:
-            clip = self.transform(clip)
+            frames = [self.transform(frame) for frame in frames]
+
+        clip = torch.stack(frames).permute(1, 0, 2, 3)  # (C, T, H, W)
+
         return clip, video_name, start, end
 
 
 # ---------------------------------------------------------------------------
-# Feature Dataset  (used for temporal head training)
+# Secondary dataset — pre-extracted features from local disk
 # ---------------------------------------------------------------------------
 
 class THUMOSFeatureDataset(Dataset):
@@ -223,4 +225,4 @@ class THUMOSFeatureDataset(Dataset):
             if c_start < c_end:
                 labels[c_start:c_end, cls_idx] = 1.0
 
-        return window, labels   # (W, D), (W, num_classes)
+        return window, labels 

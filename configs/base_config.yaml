@@ -1,23 +1,39 @@
 model:
-  backbone: "x3d_m"   # or "x3d_m", "timesformer", etc.
-  num_classes: 20               # THUMOS-14 has 20 action classes
+  model: "transformer"
+  backbone: "x3d_m"   # choices: videomae_base | videomae_large | x3d_m
+  num_classes: 20            # number of classes in data/Class Index.txt
+  pooling: "mean"             # choices: mean | attention
   pretrained: true
+  dropout: 0.5
+  num_heads: 8
+  num_layers: 4
+  ff_dim: 1024
 
 data:
-  clip_len: 16
-  frame_interval: 4
+  clip_len_sec: 2.0
+  stride_sec: 1.0
+  num_frames: 16
   num_workers: 4
-  batch_size: 32
+  batch_size: 16
+  img_size: 224               # spatial crop size
+  window_size: 128
+  stride: 64
+  subset: "training"
 
 training:
   epochs: 30
-  lr: 1e-4
-  weight_decay: 1e-4
-  lr_scheduler: "cosine"
+  lr: 1.0e-4
+  seed: 42
+  val_ratio: 0.1
+  weight_decay: 1.0e-4
+  lr_scheduler: "cosine"      # choices: cosine | constant
   warmup_epochs: 5
+  grad_clip_norm: 1.0
+  label_smoothing: 0.1
 
+# ── Modal Volume paths (inside /vol) ────────────────────────────────────────
 paths:
-  # These are paths *inside* the Modal Volume
-  data_root: "/data/thumos"
-  checkpoint_dir: "/checkpoints"
-  log_dir: "/logs"
+  data_root: "/vol/data/THUMOS14"
+  feature_dir: "/vol/data/THUMOS14/features"
+  checkpoint_dir: "/vol/checkpoints"
+  log_dir: "/vol/logs"

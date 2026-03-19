@@ -1,1 +1,5 @@
 password.txt
+__pycache__
+.venv
+.env
+.vscode

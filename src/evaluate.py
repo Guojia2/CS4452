@@ -97,6 +97,7 @@ def evaluate_model(model, data_loader, device, iou_thresholds=None):
     Adapt this to your detection head's output format.
     """
     import torch
+    from src.dataset import THUMOS14_CLASSES  # avoid circular if needed
     if iou_thresholds is None:
         iou_thresholds = [0.3, 0.4, 0.5, 0.6, 0.7]
 
@@ -128,5 +129,4 @@ def evaluate_model(model, data_loader, device, iou_thresholds=None):
                             (video_name, float(gt_clips[0]), float(gt_clips[-1]))
                         )
 
-    from src.dataset import THUMOS14_CLASSES  # avoid circular if needed
     return compute_map(all_predictions, all_ground_truths, iou_thresholds)

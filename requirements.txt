@@ -61,6 +61,7 @@ toml==0.10.2
 torch==2.10.0
 torchvision==0.25.0
 tqdm==4.67.3
+transformers>=4.40.0
 typer==0.24.0
 typer-slim==0.24.0
 types-certifi==2021.10.8.3

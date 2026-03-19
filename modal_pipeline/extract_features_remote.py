@@ -1,11 +1,8 @@
 import modal
-import yaml
-import os
 
-from src.train import train
+from src.extract_features import run_feature_extraction
 
 
-# --- Inline definitions (no import from modal_pipeline.app) ---
 app = modal.App("thumos-action-recognition")
 volume = modal.Volume.from_name("thumos-vol", create_if_missing=True)
 VOLUME_MOUNT_PATH = "/vol"
@@ -20,6 +17,7 @@ image = (
 
 GPU = "A100"
 
+
 @app.function(
     image=image,
     gpu=GPU,
@@ -27,9 +25,11 @@ GPU = "A100"
     timeout=60 * 60 * 24,
     retries=1,
 )
-def run_training(config_path: str = "configs/base_config.yaml"):
+def extract_features(config_path: str = "configs/base_config.yaml"):
     import sys
+
     sys.path.insert(0, "/root")
+    volume.reload()
 
     with open(f"/root/{config_path}") as f:
         config = yaml.safe_load(f)
@@ -40,10 +40,11 @@ def run_training(config_path: str = "configs/base_config.yaml"):
     config["paths"]["checkpoint_dir"] = os.path.join(VOLUME_MOUNT_PATH, "checkpoints")
     config["paths"]["log_dir"]        = os.path.join(VOLUME_MOUNT_PATH, "logs")
 
-    train(config)
+    run_feature_extraction(config_path=config_path, subset="training")
+
     volume.commit()
 
 
 @app.local_entrypoint()
 def main():
-    run_training.remote()
+    extract_features.remote()

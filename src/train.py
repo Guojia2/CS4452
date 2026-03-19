@@ -4,8 +4,124 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from typing import Dict, Tuple
+from src.dataset import THUMOSFeatureDataset
+from src.models.temporal_model import build_temporal_model
+from src.utils import get_logger, save_checkpoint
 
-from src.utils import get_logger, save_checkpoint, load_checkpoint
+def build_feature_dataset(config: Dict) -> THUMOSFeatureDataset:
+    return THUMOSFeatureDataset(
+        feature_dir=config["paths"]["feature_dir"],
+        ann_path=os.path.join(
+            config["paths"]["data_root"],
+            "annotations",
+            "annotations",
+            "thumos_14_anno.json",
+        ),
+        window_size=config["data"].get("window_size", 128),
+        stride=config["data"].get("stride", 64),
+        subset=config["data"].get("subset", "training"),
+    )
+
+def split_dataset(dataset, val_ratio: float, seed: int):
+    val_size = max(1, int(len(dataset) * val_ratio))
+    train_size = len(dataset) - val_size
+
+    if train_size <= 0:
+        raise ValueError("Dataset is too small for the requested validation split.")
+
+    generator = torch.Generator().manual_seed(seed)
+    return random_split(dataset, [train_size, val_size], generator=generator)
+
+def build_dataloaders(config: Dict, train_ds, val_ds) -> Tuple[DataLoader, DataLoader]:
+    batch_size = config["training"]["batch_size"]
+    num_workers = config["data"].get("num_workers", 4)
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
+    )
+
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+    )
+
+    return train_loader, val_loader
+
+def build_optimizer(config: Dict, model: nn.Module):
+    return AdamW(
+        model.parameters(),
+        lr=config["training"]["lr"],
+        weight_decay=config["training"].get("weight_decay", 0.0),
+    )
+
+def build_scheduler(config: Dict, optimizer):
+    return CosineAnnealingLR(
+        optimizer,
+        T_max=config["training"]["epochs"],
+    )
+
+def train_one_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    optimizer,
+    criterion,
+    device: torch.device,
+    logger,
+    epoch: int,
+    grad_clip_norm: float,
+) -> float:
+    model.train()
+    running_loss = 0.0
+
+    for step, (features, labels) in enumerate(loader):
+        features = features.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
+
+        optimizer.zero_grad()
+        logits = model(features)
+        loss = criterion(logits, labels)
+        loss.backward()
+
+        if grad_clip_norm > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+
+        optimizer.step()
+        running_loss += loss.item()
+
+        if step % 20 == 0:
+            logger.info(
+                f"Epoch {epoch} | Step {step}/{len(loader)} | Loss: {loss.item():.4f}"
+            )
+
+    return running_loss / len(loader)
+
+@torch.no_grad()
+def validate_one_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    criterion,
+    device: torch.device,
+) -> float:
+    model.eval()
+    running_loss = 0.0
+
+    for features, labels in loader:
+        features = features.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
+
+        logits = model(features)
+        loss = criterion(logits, labels)
+        running_loss += loss.item()
+
+    return running_loss / len(loader)
 
 
 def train(config: dict):
@@ -13,117 +129,83 @@ def train(config: dict):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Training on: {device}")
 
-    use_features = config.get("use_features", True)
+    seed = config["training"].get("seed", 42)
+    val_ratio = config["training"].get("val_ratio", 0.1)
+    grad_clip_norm = config["training"].get("grad_clip_norm", 1.0)
 
     # --- Dataset ---
-    if use_features:
-        from src.dataset import THUMOSFeatureDataset
-        dataset = THUMOSFeatureDataset(
-            feature_dir=config["paths"]["feature_dir"],
-            ann_path=os.path.join(
-                config["paths"]["data_root"], "annotations", "annotations", "thumos_14_anno.json"
-                )
-,
-            window_size=config["data"].get("window_size", 128),
-            stride=config["data"].get("stride", 64),
-        )
-        # Infer feature dim from the first sample
-        sample_feat, _ = dataset[0]
-        feature_dim = sample_feat.shape[-1]
-        logger.info(f"Feature dataset size: {len(dataset)}, feature_dim: {feature_dim}")
+    dataset = build_feature_dataset(config)
+    logger.info(f"Full dataset size: {len(dataset)}")
 
-        from src.model import TemporalDetectionHead
-        model = TemporalDetectionHead(
-            feature_dim=feature_dim,
-            num_classes=config["model"]["num_classes"],
-        ).to(device)
-    else:
-        from src.dataset import THUMOSVideoDataset
-        from src.model import ActionRecognitionModel
-        dataset = THUMOSVideoDataset(
-            video_dir=os.path.join(config["paths"]["data_root"], "videos"),
-            ann_path=os.path.join(
-                config["paths"]["data_root"], "annotations", "annotations", "thumos_14_anno.json"
-                )
-,
-            clip_len_sec=config["data"].get("clip_len_sec", 2.0),
-            stride_sec=config["data"].get("stride_sec", 1.0),
-            num_frames=config["data"].get("num_frames", 16),
-        )
-        model = ActionRecognitionModel(
-            backbone_name=config["model"]["backbone"],
-            num_classes=config["model"]["num_classes"],
-            pretrained=config["model"]["pretrained"],
-        ).to(device)
+    sample_features, sample_labels = dataset[0]
+    feature_dim = sample_features.shape[-1]
+    logger.info(
+        f"Sample feature shape: {tuple(sample_features.shape)} | "
+        f"Sample label shape: {tuple(sample_labels.shape)} | "
+        f"feature_dim: {feature_dim}"
+    )
+
+    # --- Model ---
+    model = build_temporal_model(config, feature_dim).to(device)
+    optimizer = build_optimizer(config, model)
+    scheduler = build_scheduler(config, optimizer)
+    criterion = nn.BCEWithLogitsLoss()
 
     # --- Split ---
-    val_size   = int(0.1 * len(dataset))
-    train_size = len(dataset) - val_size
-    train_ds, val_ds = random_split(dataset, [train_size, val_size])
+    train_ds, val_ds = split_dataset(dataset, val_ratio, seed)
+    train_loader, val_loader = build_dataloaders(config, train_ds, val_ds)
 
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=config["training"]["batch_size"],
-        shuffle=True,
-        num_workers=config["data"]["num_workers"],
-        pin_memory=True,
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=config["training"]["batch_size"],
-        shuffle=False,
-        num_workers=config["data"]["num_workers"],
-        pin_memory=True,
-    )
-
-    # --- Optimizer ---
-    optimizer = AdamW(
-        model.parameters(),
-        lr=config["training"]["lr"],
-        weight_decay=config["training"]["weight_decay"],
-    )
-    scheduler = CosineAnnealingLR(optimizer, T_max=config["training"]["epochs"])
-    criterion = nn.BCEWithLogitsLoss()   # Multi-label for temporal detection
-
-    best_map = 0.0
+    best_val_loss = float("inf")
 
     for epoch in range(config["training"]["epochs"]):
         # --- Train ---
-        model.train()
-        running_loss = 0.0
-        for step, (feats, labels) in enumerate(train_loader):
-            feats, labels = feats.to(device), labels.to(device)
-            optimizer.zero_grad()
-            logits = model(feats)          # (B, W, num_classes)
-            loss   = criterion(logits, labels)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            running_loss += loss.item()
-            if step % 20 == 0:
-                logger.info(f"Epoch {epoch} | Step {step}/{len(train_loader)} | Loss: {loss.item():.4f}")
+        train_loss = train_one_epoch(
+            model=model,
+            loader=train_loader,
+            optimizer=optimizer,
+            criterion=criterion,
+            device=device,
+            logger=logger,
+            epoch=epoch,
+            grad_clip_norm=grad_clip_norm,
+        )
+
+        val_loss = validate_one_epoch(
+            model=model,
+            loader=val_loader,
+            criterion=criterion,
+            device=device,
+        )
 
         scheduler.step()
-        avg_loss = running_loss / len(train_loader)
 
-        # --- Validate ---
-        model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            for feats, labels in val_loader:
-                feats, labels = feats.to(device), labels.to(device)
-                logits   = model(feats)
-                val_loss += criterion(logits, labels).item()
-        val_loss /= len(val_loader)
-        logger.info(f"Epoch {epoch} | Train Loss: {avg_loss:.4f} | Val Loss: {val_loss:.4f}")
+        logger.info(
+            f"Epoch {epoch} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}"
+        )
 
-        # Save checkpoint every epoch; keep best separately
         ckpt_path = os.path.join(config["paths"]["checkpoint_dir"], f"epoch_{epoch}.pt")
-        save_checkpoint(ckpt_path, model, optimizer, epoch, {"val_loss": val_loss})
+        save_checkpoint(
+            ckpt_path,
+            model,
+            optimizer,
+            epoch,
+            {
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+            },
+        )
 
-        if val_loss < best_map:   # Swap for mAP once evaluate_model is wired in
-            best_map = val_loss
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            ckpt_path = os.path.join(config["paths"]["checkpoint_dir"], f"best.pt")
             save_checkpoint(
-                os.path.join(config["paths"]["checkpoint_dir"], "best.pt"),
-                model, optimizer, epoch, {"val_loss": val_loss},
+                ckpt_path,
+                model,
+                optimizer,
+                epoch,
+                {
+                    "train_loss": train_loss,
+                    "val_loss": val_loss,
+                },
             )
+            logger.info(f"Saved new best checkpoint at epoch {epoch}")
