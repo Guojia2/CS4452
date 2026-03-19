@@ -1,19 +1,3 @@
-"""
-backbone.py — Video encoder / feature extractor choices.
-
-Supported backbones
--------------------
-- "videomae_base"   : VideoMAE ViT-Base pretrained on Kinetics-400 (via transformers)
-- "videomae_large"  : VideoMAE ViT-Large pretrained on Kinetics-400 (via transformers)
-- "x3d_m"           : X3D-M via pytorchvideo (legacy / lightweight baseline)
-
-Adding a new backbone
----------------------
-1. Add an `elif backbone_name == "your_name":` block below.
-2. Strip the classification head so the backbone returns features.
-3. Return `(model, feature_dim)`.
-"""
-
 import torch
 import torch.nn as nn
 from typing import Tuple
@@ -108,21 +92,26 @@ def _build_videomae(name: str, pretrained: bool) -> Tuple[nn.Module, int]:
 
 def _build_x3d_m(pretrained: bool) -> Tuple[nn.Module, int]:
     try:
-        import pytorchvideo.models as pv_models
-    except ImportError:
+        from pytorchvideo.models.x3d import create_x3d
+    except ImportError as e:
         raise ImportError(
-            "pytorchvideo is required for X3D backbones. "
-            "Install it with: pip install pytorchvideo"
-        )
+            "pytorchvideo is required for X3D. Install it with: pip install pytorchvideo"
+        ) from e
 
-    model = pv_models.x3d.create_x3d(
+    model = create_x3d(
         input_clip_length=16,
         input_crop_size=224,
-        model_num_class=400,   # Kinetics pretrained head size
-        pretrained=pretrained,
+        model_num_class=400,
     )
 
-    # Strip classification head — get feature_dim from the projection layer
+    if pretrained:
+        pretrained_model = torch.hub.load(
+            "facebookresearch/pytorchvideo",
+            "x3d_m",
+            pretrained=True,
+        )
+        model.load_state_dict(pretrained_model.state_dict(), strict=False)
+
     feature_dim = model.blocks[-1].proj.in_features
     model.blocks[-1].proj = nn.Identity()
 

@@ -1,10 +1,7 @@
 from .backbone import build_backbone
-from .pooling import MeanPooling, AttentionPooling
-from .classifier import ClassificationHead
+from .temporal_model import build_temporal_model
 
 __all__ = [
     "build_backbone",
-    "MeanPooling",
-    "AttentionPooling",
-    "ClassificationHead",
+    "build_temporal_model",
 ]
