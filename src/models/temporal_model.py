@@ -7,7 +7,7 @@ from typing import Dict
 # ---------------------------------------------------------------------------
 
 def build_temporal_model(config: Dict, feature_dim: int) -> nn.Module:
-    model_name = config["model"].get("name", "transformer")
+    model_name = config["model"].get("model", "transformer")
 
     if model_name == "transformer":
         return TransformerModel(

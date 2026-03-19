@@ -1,5 +1,5 @@
 model:
-  name: "transformer"
+  model: "transformer"
   backbone: "x3d_m"   # choices: videomae_base | videomae_large | x3d_m
   num_classes: 20            # number of classes in data/Class Index.txt
   pooling: "mean"             # choices: mean | attention
