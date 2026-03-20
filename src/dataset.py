@@ -1,14 +1,13 @@
 
 from __future__ import annotations
 
+import os                          # ← this was missing
 import json
 from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 from torch.utils.data import Dataset
 import torchvision.transforms as T
-from pytorchvideo.data.encoded_video import EncodedVideo
-from pytorchvideo.data.functional import decode_video_frames as pytorchvideo_decode
 from torchvision.io import read_video
 from PIL import Image
 
