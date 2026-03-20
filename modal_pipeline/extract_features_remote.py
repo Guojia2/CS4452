@@ -136,10 +136,10 @@ def extract_test_features(
             feats = backbone(batch_tensors).cpu()
             all_feats.append(feats)
 
-            all_feats = torch.cat(all_feats, dim=0)
-            save_path = os.path.join(feat_dir, f"{video_name}.pt")
-            torch.save(all_feats, save_path)
-            logger.info(f"Saved {video_name}: {all_feats.shape}")
+        all_feats = torch.cat(all_feats, dim=0)
+        save_path = os.path.join(feat_dir, f"{video_name}.pt")
+        torch.save(all_feats, save_path)
+        logger.info(f"Saved {video_name}: {all_feats.shape}")
 
     volume.commit()
     logger.info(f"Done. Test features saved to {feat_dir}")

@@ -6,6 +6,8 @@ from typing import Dict
 # Model builder
 # ---------------------------------------------------------------------------
 
+
+
 def build_temporal_model(config: Dict, feature_dim: int) -> nn.Module:
     model_name = config["model"].get("model", "transformer")
 
@@ -17,10 +19,7 @@ def build_temporal_model(config: Dict, feature_dim: int) -> nn.Module:
             num_layers=config["model"].get("num_layers", 4),
             ff_dim=config["model"].get("ff_dim", 1024),
             dropout=config["model"].get("dropout", 0.1),
-            max_seq_len=config["model"].get(
-                "max_seq_len",
-                config["data"].get("window_size", 128),
-            ),
+            max_seq_len=config["model"].get("max_seq_len", 256),
         )
     elif model_name == "cnn":
         return TemporalCNNModel(
