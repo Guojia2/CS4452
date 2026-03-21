@@ -1,5 +1,5 @@
 model:
-  model: "transformer"
+  model: "cnn"
   backbone: "x3d_m"   # choices: videomae_base | videomae_large | x3d_m
   num_classes: 20            # number of classes in data/Class Index.txt
   pooling: "mean"             # choices: mean | attention
@@ -17,23 +17,24 @@ data:
   batch_size: 16
   img_size: 224               # spatial crop size
   window_size: 128
-  stride: 64
+  stride: 16
   subset: "training"
 
 training:
-  epochs: 30
-  lr: 1.0e-4
+  epochs: 200
+  lr: 0.0001
   seed: 42
   val_ratio: 0.1
-  weight_decay: 1.0e-4
-  lr_scheduler: "cosine"      # choices: cosine | constant
+  weight_decay: 0.0001
+  lr_scheduler: "cosine"
   warmup_epochs: 5
   grad_clip_norm: 1.0
   label_smoothing: 0.1
+  batch_size: 32
 
 # ── Modal Volume paths (inside /vol) ────────────────────────────────────────
 paths:
   data_root: "/vol/data/THUMOS14"
-  feature_dir: "/vol/data/THUMOS14/features"
+  feature_dir: "/vol/features/clip_level"  #  /vol/features/videomae_base | /vol/features/videomae_base
   checkpoint_dir: "/vol/checkpoints"
   log_dir: "/vol/logs"

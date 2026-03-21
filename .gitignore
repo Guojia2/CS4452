@@ -3,3 +3,8 @@ __pycache__
 .venv
 .env
 .vscode
+local_checkpoints/
+requirements.txt
+password.txt
+venv
+.venv
