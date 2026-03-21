@@ -3,13 +3,27 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, SequentialLR, LinearLR
 from typing import Dict, Tuple
+import torch.nn.functional as F          # add this line
 
 from src.dataset import THUMOSFeatureDataset
 from src.models.temporal_model import build_temporal_model
 from src.utils import get_logger, save_checkpoint
 
+
+
+class FocalLoss(nn.Module):
+    def __init__(self, alpha: float = 0.25, gamma: float = 2.0):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        bce    = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+        pt     = torch.exp(-bce)
+        focal  = self.alpha * (1 - pt) ** self.gamma * bce
+        return focal.mean()
 
 def build_feature_dataset(config: Dict) -> THUMOSFeatureDataset:
     return THUMOSFeatureDataset(
@@ -57,7 +71,25 @@ def build_optimizer(config: Dict, model: nn.Module):
 
 
 def build_scheduler(config: Dict, optimizer):
-    return CosineAnnealingLR(optimizer, T_max=config["training"]["epochs"])
+    epochs        = config["training"]["epochs"]
+    warmup_epochs = config["training"].get("warmup_epochs", 5)
+    cosine_epochs = epochs - warmup_epochs
+
+    warmup_scheduler = LinearLR(
+        optimizer,
+        start_factor=0.1,    # starts at 10% of base lr
+        end_factor=1.0,      # ramps up to 100% of base lr
+        total_iters=warmup_epochs,
+    )
+    cosine_scheduler = CosineAnnealingLR(
+        optimizer,
+        T_max=cosine_epochs,
+    )
+    return SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[warmup_epochs],
+    )
 
 
 def train_one_epoch(model, loader, optimizer, criterion, device, logger, epoch, grad_clip_norm):
@@ -111,8 +143,7 @@ def train(config: dict):
     model     = build_temporal_model(config, feature_dim).to(device)
     optimizer = build_optimizer(config, model)
     scheduler = build_scheduler(config, optimizer)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=torch.ones(config["model"]["num_classes"]).to(device) * 10)
-
+    criterion = FocalLoss(alpha=0.25, gamma=2.0)
     train_ds, val_ds = split_dataset(dataset, val_ratio, seed)
     train_loader, val_loader = build_dataloaders(config, train_ds, val_ds)
 
