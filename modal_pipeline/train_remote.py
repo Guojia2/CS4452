@@ -28,7 +28,6 @@ def run_training(config_path: str = "configs/base_config.yaml"):
     import os
     import yaml
     sys.path.insert(0, "/root")
-    volume.reload()
 
     from src.train import train
 

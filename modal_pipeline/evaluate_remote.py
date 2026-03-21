@@ -46,7 +46,7 @@ def run_evaluation(
         config = yaml.safe_load(f)
 
     config["paths"]["data_root"]      = os.path.join(VOLUME_MOUNT_PATH, "raw")
-    config["paths"]["feature_dir"]    = os.path.join(VOLUME_MOUNT_PATH, "features", "test")
+    config["paths"]["feature_dir"] = os.path.join(VOLUME_MOUNT_PATH, "features", "clip_level")
     config["paths"]["checkpoint_dir"] = os.path.join(VOLUME_MOUNT_PATH, "checkpoints")
 
     # --- Load model ---
@@ -60,11 +60,23 @@ def run_evaluation(
 
     # --- Load test annotations (for ground truth segments) ---
     ann_path = os.path.join(VOLUME_MOUNT_PATH, "raw", "annotations", "thumos_14_anno.json")
-    annotations = load_thumos_annotations(ann_path, subset="test")
+    annotations = load_thumos_annotations(ann_path, subset="training")
     logger.info(f"Test videos with annotations: {len(annotations)}")
+
+    annotations_all = load_thumos_annotations(ann_path)
+    subsets = set(v.get("subset") for v in annotations_all.values())
+    logger.info(f"Available subsets in annotation file: {subsets}")
+
+    # Also check how many have actual annotations
+    for subset in subsets:
+        sub = load_thumos_annotations(ann_path, subset=subset)
+        annotated = sum(1 for v in sub.values() if v.get("annotations"))
+        logger.info(f"  {subset}: {len(sub)} videos, {annotated} with annotations")
 
     # --- Run inference on test features ---
     feat_dir = config["paths"]["feature_dir"]
+    logger.info(f"Feature dir: {feat_dir}")                              # 
+    logger.info(f"Feature dir exists: {os.path.exists(feat_dir)}")      #
     feat_files = sorted([f for f in os.listdir(feat_dir) if f.endswith(".pt")])
     logger.info(f"Test feature files found: {len(feat_files)}")
 
@@ -104,7 +116,7 @@ def run_evaluation(
             scores = torch.sigmoid(all_logits).numpy()  # (N_clips, C)
 
             # Convert per-clip scores to segments using threshold
-            threshold = 0.5
+            threshold = 0.2
             for cls_idx, cls_name in enumerate(THUMOS14_CLASSES):
                 cls_scores = scores[:, cls_idx]
                 # Find contiguous runs above threshold
@@ -139,7 +151,41 @@ def run_evaluation(
                         all_ground_truths[cls_name].append(
                             (video_name, seg_start, seg_end)
                         )
+    # Check what the raw sigmoid scores look like
+    sample_feat_file = feat_files[0]
+    sample_features = torch.load(os.path.join(feat_dir, sample_feat_file))
+    n_clips = sample_features.shape[0]
 
+    with torch.no_grad():
+        window = sample_features[:window_size].unsqueeze(0).to(device)
+        if window.shape[1] < window_size:
+            pad = torch.zeros(1, window_size - window.shape[1], window.shape[2]).to(device)
+            window = torch.cat([window, pad], dim=1)
+        logits = model(window).squeeze(0)
+        scores = torch.sigmoid(logits)
+
+    logger.info(f"Sample video: {sample_feat_file}")
+    logger.info(f"Score stats — min: {scores.min():.4f}, max: {scores.max():.4f}, mean: {scores.mean():.4f}")
+    logger.info(f"Clips above 0.2 threshold: {(scores > 0.2).sum().item()} / {scores.numel()}")
+    logger.info(f"Clips above 0.5 threshold: {(scores > 0.5).sum().item()} / {scores.numel()}")
+    # Debug — check if predictions and ground truths have any content
+    # total_preds = sum(len(v) for v in all_predictions.values())
+    # total_gts   = sum(len(v) for v in all_ground_truths.values())
+    # logger.info(f"Total predictions: {total_preds}")
+    # logger.info(f"Total ground truths: {total_gts}")
+
+    # # Show which classes have predictions
+    # for cls_name in THUMOS14_CLASSES:
+    #     n_pred = len(all_predictions[cls_name])
+    #     n_gt   = len(all_ground_truths[cls_name])
+    #     if n_pred > 0 or n_gt > 0:
+    #         logger.info(f"  {cls_name}: {n_pred} preds, {n_gt} gts")
+
+    # # Check a sample feature file name vs annotation keys
+    # sample_feat = feat_files[0].replace(".pt", "")
+    # logger.info(f"Sample feature name: {sample_feat}")
+    # logger.info(f"Sample in annotations: {sample_feat in annotations}")
+    # logger.info(f"First 3 annotation keys: {list(annotations.keys())[:3]}")   
     # --- Compute mAP ---
     from src.evaluate import compute_map
     results = compute_map(all_predictions, all_ground_truths, iou_thresholds)
@@ -156,7 +202,7 @@ def run_evaluation(
 
 @app.local_entrypoint()
 def main():
-    results = run_evaluation.remote(checkpoint="epoch_29.pt") # change epoch_29.pt to best.pt once you fix the naming bug
+    results = run_evaluation.remote(checkpoint="best.pt") # change epoch_29.pt to best.pt once you fix the naming bug
     print("\nFinal mAP Results:")
     for k, v in results.items():
         print(f"  {k}: {v:.4f}")

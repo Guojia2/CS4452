@@ -111,7 +111,7 @@ def train(config: dict):
     model     = build_temporal_model(config, feature_dim).to(device)
     optimizer = build_optimizer(config, model)
     scheduler = build_scheduler(config, optimizer)
-    criterion = nn.BCEWithLogitsLoss()
+    criterion = nn.BCEWithLogitsLoss(pos_weight=torch.ones(config["model"]["num_classes"]).to(device) * 10)
 
     train_ds, val_ds = split_dataset(dataset, val_ratio, seed)
     train_loader, val_loader = build_dataloaders(config, train_ds, val_ds)

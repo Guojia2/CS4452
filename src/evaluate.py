@@ -43,7 +43,7 @@ def compute_ap(
     # Area under PR curve using trapezoidal rule
     recall    = np.concatenate([[0.0], recall,    [recall[-1]]])
     precision = np.concatenate([[1.0], precision, [0.0]])
-    ap = np.trapz(precision, recall)
+    ap = np.trapezoid(precision, recall)
     return float(ap)
 
 
