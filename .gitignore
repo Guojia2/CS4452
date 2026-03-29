@@ -8,3 +8,4 @@ requirements.txt
 password.txt
 venv
 .venv
+data/
