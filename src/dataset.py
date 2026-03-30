@@ -6,9 +6,10 @@ import json
 from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
+import numpy as np
 from torch.utils.data import Dataset
 import torchvision.transforms as T
-from torchvision.io import read_video
+import av
 from PIL import Image
 
 
@@ -72,26 +73,42 @@ def decode_video_frames(
     end_sec: float,
     num_frames: int,
 ) -> List[Image.Image]:
-    frames, _, _ = read_video(
-        video_path,
-        start_pts=start_sec,
-        end_pts=end_sec,
-        pts_unit="sec",
-    )  # (T, H, W, C)
+    container = av.open(video_path)
+    stream = container.streams.video[0]
+    fps = float(stream.average_rate)
 
-    if frames.shape[0] == 0:
+    start_frame = int(start_sec * fps)
+    end_frame = int(end_sec * fps)
+
+    # Seek near the start and decode frames in range
+    all_frames = []
+    container.seek(int(start_sec * av.time_base), any_frame=False)
+    for frame in container.decode(video=0):
+        pts_sec = float(frame.pts * stream.time_base)
+        if pts_sec < start_sec - 0.1:
+            continue
+        if pts_sec > end_sec + 0.1:
+            break
+        all_frames.append(frame.to_ndarray(format="rgb24"))
+
+    container.close()
+
+    if len(all_frames) == 0:
         raise ValueError(
             f"No frames decoded from {video_path} between {start_sec:.2f}s and {end_sec:.2f}s"
         )
 
-    if frames.shape[0] == 1:
-        indices = torch.zeros(num_frames, dtype=torch.long)
+    frames = np.stack(all_frames)  # (T, H, W, C)
+    n = frames.shape[0]
+
+    if n == 1:
+        indices = np.zeros(num_frames, dtype=np.int64)
     else:
-        indices = torch.linspace(0, frames.shape[0] - 1, steps=num_frames).long()
+        indices = np.linspace(0, n - 1, num=num_frames).astype(np.int64)
 
     sampled = frames[indices]  # (num_frames, H, W, C)
 
-    return [Image.fromarray(frame.numpy()) for frame in sampled]
+    return [Image.fromarray(f) for f in sampled]
 
 
 class THUMOSVideoDataset(Dataset):
@@ -165,27 +182,35 @@ class THUMOSFeatureDataset(Dataset):
         self,
         feature_dir: str,
         ann_path: str,
-        window_size: int = 128,   # number of clips per training sample
+        window_size: int = 128,
         stride: int = 64,
-        subset: str = "training",   
-
-        split: str = "val",       # THUMOS uses "val" for training TAD models
+        subset: str = "training",
+        split: str = "val",
+        aug_config: Optional[Dict] = None,
+        training: bool = False,
     ):
         self.feature_dir = feature_dir
         self.window_size = window_size
         self.stride      = stride
+        self.aug_config  = aug_config or {}
+        self.training    = training
 
-        annotations = load_thumos_annotations(ann_path, subset = subset)
+        annotations = load_thumos_annotations(ann_path, subset=subset)
         self.samples: List[Dict] = []
+
+        # Action segment index for cut-and-paste: {class_name: [(feat_path, clip_start, clip_end, n_clips, duration)]}
+        self.action_index: Dict[str, List[Tuple]] = {c: [] for c in THUMOS14_CLASSES}
 
         for video_name, meta in annotations.items():
             feat_path = os.path.join(feature_dir, f"{video_name}.pt")
             if not os.path.exists(feat_path):
                 continue
 
-            features = torch.load(feat_path)          # (N_clips, D)
+            features = torch.load(feat_path, weights_only=True)  # (N_clips, D)
             n_clips  = features.shape[0]
-            gt_segs  = meta["annotations"]            # list of {label, segment}
+            gt_segs  = meta["annotations"]
+            duration = meta["duration"]
+            clips_per_sec = n_clips / duration
 
             start = 0
             while start + window_size <= n_clips:
@@ -193,20 +218,119 @@ class THUMOSFeatureDataset(Dataset):
                     "feat_path": feat_path,
                     "start":     start,
                     "gt_segs":   gt_segs,
-                    "duration":  meta["duration"],
+                    "duration":  duration,
                     "n_clips":   n_clips,
                 })
                 start += stride
 
+            # Build action segment index for cut-and-paste
+            for ann in gt_segs:
+                label = ann["label"]
+                if label not in CLASS_TO_IDX:
+                    continue
+                seg_start, seg_end = ann["segment"]
+                c_start = int(seg_start * clips_per_sec)
+                c_end   = int(seg_end * clips_per_sec)
+                if c_end > c_start:
+                    self.action_index[label].append(
+                        (feat_path, c_start, c_end, n_clips, duration)
+                    )
+
     def __len__(self):
         return len(self.samples)
 
+    def _jitter_start(self, start: int, n_clips: int) -> int:
+        """Apply random offset to window start position during training."""
+        jitter_range = self.stride // 2
+        offset = torch.randint(-jitter_range, jitter_range + 1, (1,)).item()
+        new_start = start + offset
+        new_start = max(0, min(new_start, n_clips - self.window_size))
+        return new_start
+
+    def _cutpaste(
+        self, features: torch.Tensor, labels: torch.Tensor, s: Dict
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Paste a random rare-class action segment into a background region.
+
+        Picks a random class (weighted toward underrepresented ones),
+        copies its features from a donor video, and overwrites a background
+        span in the current window.
+        """
+        import random
+
+        num_classes = len(THUMOS14_CLASSES)
+
+        # Find classes that have at least one segment in the index
+        candidates = [c for c in THUMOS14_CLASSES if len(self.action_index[c]) > 0]
+        if not candidates:
+            return features, labels
+
+        # Weight toward rarer classes (inverse frequency)
+        counts = [len(self.action_index[c]) for c in candidates]
+        max_count = max(counts)
+        weights = [max_count / c for c in counts]
+        donor_class = random.choices(candidates, weights=weights, k=1)[0]
+        cls_idx = CLASS_TO_IDX[donor_class]
+
+        # Pick a random segment from that class
+        seg_info = random.choice(self.action_index[donor_class])
+        feat_path, seg_c_start, seg_c_end, _, _ = seg_info
+        seg_len = seg_c_end - seg_c_start
+
+        if seg_len <= 0 or seg_len > self.window_size // 2:
+            return features, labels
+
+        # Load donor features
+        donor_feats = torch.load(feat_path, weights_only=True)
+        seg_c_end = min(seg_c_end, donor_feats.shape[0])
+        donor_clip = donor_feats[seg_c_start:seg_c_end]  # (seg_len, D)
+        seg_len = donor_clip.shape[0]
+
+        if seg_len == 0:
+            return features, labels
+
+        # Find a background span (all labels zero) in current window
+        bg_mask = (labels.sum(dim=1) == 0)  # (W,) — True where background
+        W = features.shape[0]
+
+        # Scan for a contiguous background region >= seg_len
+        best_start = -1
+        run_start = -1
+        run_len = 0
+        for i in range(W):
+            if bg_mask[i]:
+                if run_start == -1:
+                    run_start = i
+                run_len = i - run_start + 1
+                if run_len >= seg_len:
+                    best_start = run_start
+                    break
+            else:
+                run_start = -1
+                run_len = 0
+
+        if best_start == -1:
+            return features, labels
+
+        # Paste
+        features[best_start : best_start + seg_len] = donor_clip
+        labels[best_start : best_start + seg_len, cls_idx] = 1.0
+
+        return features, labels
+
     def __getitem__(self, idx):
         s = self.samples[idx]
-        features = torch.load(s["feat_path"])                    # (N_clips, D)
-        window   = features[s["start"]: s["start"] + self.window_size]  # (W, D)
+        features = torch.load(s["feat_path"], weights_only=True)  # (N_clips, D)
 
-        # Build a per-clip label vector  (multi-label, one-hot)
+        # Window jitter during training
+        start = s["start"]
+        if self.training and self.aug_config.get("window_jitter", False):
+            start = self._jitter_start(start, s["n_clips"])
+
+        window = features[start : start + self.window_size]  # (W, D)
+
+        # Build per-clip label vector (multi-label, one-hot)
         num_classes = len(THUMOS14_CLASSES)
         labels = torch.zeros(self.window_size, num_classes)
 
@@ -216,12 +340,23 @@ class THUMOSFeatureDataset(Dataset):
             if cls_idx == -1:
                 continue
             seg_start, seg_end = ann["segment"]
-            # Convert seconds → clip indices
-            c_start = int(seg_start * clips_per_sec) - s["start"]
-            c_end   = int(seg_end   * clips_per_sec) - s["start"]
+            c_start = int(seg_start * clips_per_sec) - start
+            c_end   = int(seg_end   * clips_per_sec) - start
             c_start = max(0, c_start)
             c_end   = min(self.window_size, c_end)
             if c_start < c_end:
                 labels[c_start:c_end, cls_idx] = 1.0
 
-        return window, labels 
+        # Cut-and-paste augmentation
+        cp_cfg = self.aug_config.get("cutpaste", {})
+        if self.training and cp_cfg.get("enabled", False):
+            import random
+            if random.random() < cp_cfg.get("prob", 0.3):
+                window, labels = self._cutpaste(window.clone(), labels, s)
+
+        # Feature-level augmentations (noise, masking, speed, etc.)
+        if self.training:
+            from src.augmentations import apply_augmentations
+            window, labels = apply_augmentations(window, labels, self.aug_config)
+
+        return window, labels

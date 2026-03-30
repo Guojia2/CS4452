@@ -32,6 +32,38 @@ training:
   label_smoothing: 0.1
   batch_size: 32
 
+# ── Feature extraction ───────────────────────────────────────────────────────
+extraction:
+  num_workers: 2       # parallel processes sharing the GPU (1 = single-process)
+  batch_size: 64       # clips per backbone inference batch (use 32 if OOM)
+
+# ── Augmentation (feature-level, training only) ─────────────────────────────
+augmentation:
+  window_jitter: false
+  class_balanced_sampling: false
+  gaussian_noise:
+    enabled: false
+    std: 0.01
+  time_mask:
+    enabled: false
+    max_len: 10
+  feature_mask:
+    enabled: false
+    max_len: 256
+  feature_dropout:
+    enabled: false
+    p: 0.1
+  mixup:
+    enabled: false
+    alpha: 0.2
+    prob: 0.5
+  cutpaste:
+    enabled: false
+    prob: 0.3
+  speed_perturb:
+    enabled: false
+    range: [0.8, 1.2]
+
 # ── Modal Volume paths (inside /vol) ────────────────────────────────────────
 paths:
   data_root: "/vol/data/THUMOS14"

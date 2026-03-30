@@ -1,150 +1,137 @@
+"""
+Feature extraction on Modal — parallel across all videos.
+
+Reads raw videos from the shared dataset volume (main env).
+Writes (N_clips, 2048) .pt feature files to the work volume (alex-dev env).
+
+Run:
+  modal run modal_pipeline/extract_features_remote.py
+"""
+
 import modal
 import os
 
-app = modal.App("thumos-action-recognition")
-volume = modal.Volume.from_name("thumos-vol", create_if_missing=True)
-VOLUME_MOUNT_PATH = "/vol"
+from modal_pipeline.app import app, image, dataset_volume, work_volume, DATASET_PATH, WORK_PATH
 
-image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install_from_requirements("requirements.txt")
-    .apt_install("ffmpeg")
-    .add_local_dir("src", remote_path="/root/src")
-    .add_local_dir("configs", remote_path="/root/configs")
-)
+# ── GPU worker — X3D-M loaded once per container via @modal.enter() ──────────
 
-GPU = "A100"
-
-
-@app.function(
+@app.cls(
     image=image,
-    gpu=GPU,
-    volumes={VOLUME_MOUNT_PATH: volume},
-    timeout=60 * 60 * 24,
-    retries=1,
+    gpu="t4",                   # T4 sufficient for X3D-M inference
+    volumes={
+        DATASET_PATH: dataset_volume,   # read-only: raw videos + annotations
+        WORK_PATH:    work_volume,       # read-write: output features
+    },
+    timeout=600,                # 10-min ceiling per video call
+    cpu=4,                      # 2 for decord decode threads + 1 prefetch + 1 spare
+    memory=8192,
+    max_containers=5,        # stay under Modal free-tier GPU cap
 )
-def extract_features(
-    config_path: str = "configs/base_config.yaml",
-    subset: str = "training",
-):
-    import sys
-    import os
-    import yaml
-    sys.path.insert(0, "/root")
-    volume.reload()
+class FeatureExtractor:
 
-    from src.extract_features import run_feature_extraction
+    @modal.enter()
+    def load_model(self):
+        import sys
+        import torch
+        sys.path.insert(0, "/root")
 
-    with open(f"/root/{config_path}") as f:
-        config = yaml.safe_load(f)
+        # Cache X3D-M weights to the work volume — downloaded once, reused forever
+        torch.hub.set_dir(f"{WORK_PATH}/torch_hub")
 
-    # Remap paths to actual Volume layout
-    config["paths"]["data_root"]      = os.path.join(VOLUME_MOUNT_PATH, "raw")
-    config["paths"]["feature_dir"]    = os.path.join(VOLUME_MOUNT_PATH, "features", "clip_level")
-    config["paths"]["checkpoint_dir"] = os.path.join(VOLUME_MOUNT_PATH, "checkpoints")
-    config["paths"]["log_dir"]        = os.path.join(VOLUME_MOUNT_PATH, "logs")
+        from src.models.backbone import build_backbone
+        from src.extract_features import build_transforms
 
-    # Write the remapped config to a temp file so run_feature_extraction can read it
-    import tempfile
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".yaml", delete=False
-    ) as tmp:
-        yaml.dump(config, tmp)
-        tmp_path = tmp.name
+        self.device = torch.device("cuda")
+        self.backbone, _ = build_backbone("x3d_m", pretrained=True)
+        self.backbone = self.backbone.to(self.device).eval()
+        self.transform = build_transforms()
 
-    run_feature_extraction(config_path=tmp_path, subset=subset)
-    volume.commit()
+    @modal.method()
+    def extract(self, video_name: str) -> str:
+        import sys
+        import torch
+        import os
+        sys.path.insert(0, "/root")
+
+        from src.extract_features import extract_video
+
+        feat_path = f"{WORK_PATH}/features/clip_level/{video_name}.pt"
+        if os.path.exists(feat_path):
+            return f"skip:{video_name}"
+
+        if "validation" in video_name:
+            video_path = f"{DATASET_PATH}/raw/videos/val/{video_name}.mp4"
+        else:
+            video_path = f"{DATASET_PATH}/raw/videos/test/{video_name}.mp4"
+
+        if not os.path.exists(video_path):
+            return f"missing:{video_name}"
+
+        os.makedirs(f"{WORK_PATH}/features/clip_level", exist_ok=True)
+
+        feats = extract_video(
+            video_path, self.backbone, self.device,
+            clip_len_sec=2.0, stride_sec=1.0, num_frames=16,
+            transform=self.transform, batch_size=64,
+        )
+
+        if feats is None:
+            return f"failed:{video_name}"
+
+        torch.save(feats, feat_path)
+        work_volume.commit()
+        return f"done:{video_name}:{list(feats.shape)}"
 
 
-@app.function(
-    image=image,
-    gpu=GPU,
-    volumes={VOLUME_MOUNT_PATH: volume},
-    timeout=60 * 60 * 24,
-    retries=1,
-)
-def extract_test_features(
-    config_path: str = "configs/base_config.yaml",
-):
-    import sys
-    import os
-    import yaml
-    import torch
-    import av
-    sys.path.insert(0, "/root")
-    volume.reload()
-
-    from src.models.backbone import build_backbone
-    from src.dataset import decode_video_frames
-    from src.utils import get_logger
-    from src.dataset import build_transforms
-
-    with open(f"/root/{config_path}") as f:
-        config = yaml.safe_load(f)
-
-    backbone_name = config["model"]["backbone"]
-    clip_len_sec  = config["data"]["clip_len_sec"]
-    stride_sec    = config["data"]["stride_sec"]
-    num_frames    = config["data"]["num_frames"]
-    batch_size    = config["data"]["batch_size"]
-
-    logger = get_logger("feature_extraction_test")
-    device = torch.device("cuda")
-
-    logger.info(f"Loading backbone: {backbone_name}")
-    backbone, feature_dim = build_backbone(backbone_name, pretrained=True)
-    backbone = backbone.to(device).eval()
-
-    video_dir = os.path.join(VOLUME_MOUNT_PATH, "raw", "videos", "test")
-    feat_dir  = os.path.join(VOLUME_MOUNT_PATH, "features", "test")
-    os.makedirs(feat_dir, exist_ok=True)
-
-    video_files = sorted([f for f in os.listdir(video_dir) if f.endswith(".mp4")])
-    logger.info(f"Found {len(video_files)} test videos")
-
-    with torch.no_grad():
-        for video_file in video_files:
-            video_path = os.path.join(video_dir, video_file)
-            video_name = video_file.replace(".mp4", "")
-
-            container = av.open(video_path)
-            stream = container.streams.video[0]
-            duration = float(stream.duration * stream.time_base)
-            container.close()
-
-            clips = []
-            start = 0.0
-            while start + clip_len_sec <= duration:
-                clips.append((start, start + clip_len_sec))
-                start += stride_sec
-
-            if not clips:
-                logger.info(f"Skipping {video_name} — too short")
-                continue
-
-        transform = build_transforms(img_size=config["data"].get("img_size", 224))
-
-        all_feats = []
-        for i in range(0, len(clips), batch_size):
-            batch_clips = clips[i:i + batch_size]
-            batch_tensors = torch.stack([
-                torch.stack([
-                    transform(f) for f in decode_video_frames(video_path, s, e, num_frames)
-                ]).permute(1, 0, 2, 3)
-                for s, e in batch_clips
-            ]).to(device)
-            feats = backbone(batch_tensors).cpu()
-            all_feats.append(feats)
-
-        all_feats = torch.cat(all_feats, dim=0)
-        save_path = os.path.join(feat_dir, f"{video_name}.pt")
-        torch.save(all_feats, save_path)
-        logger.info(f"Saved {video_name}: {all_feats.shape}")
-
-    volume.commit()
-    logger.info(f"Done. Test features saved to {feat_dir}")
-
+# ── Local entrypoint ──────────────────────────────────────────────────────────
 
 @app.local_entrypoint()
 def main():
-    extract_test_features.remote()
+    import json
+
+    ann_path = "data/THUMOS14/annotations/annotations/thumos_14_anno.json"
+    if not os.path.exists(ann_path):
+        # Fallback in case local data isn't present — list from volume
+        print("Local annotations not found. Reading video list from Modal volume...")
+        import subprocess
+        result = subprocess.run(
+            ["modal", "volume", "ls", "--env", "main", "thumos-vol", "raw/videos/val"],
+            capture_output=True, text=True,
+        )
+        val_names = [
+            l.split("/")[-1].replace(".mp4", "")
+            for l in result.stdout.splitlines() if l.endswith(".mp4")
+        ]
+        result = subprocess.run(
+            ["modal", "volume", "ls", "--env", "main", "thumos-vol", "raw/videos/test"],
+            capture_output=True, text=True,
+        )
+        test_names = [
+            l.split("/")[-1].replace(".mp4", "")
+            for l in result.stdout.splitlines() if l.endswith(".mp4")
+        ]
+        video_names = sorted(val_names + test_names)
+    else:
+        with open(ann_path) as f:
+            db = json.load(f)["database"]
+        video_names = sorted(db.keys())
+
+    print(f"Submitting extraction for {len(video_names)} videos...")
+
+    extractor = FeatureExtractor()
+    done = skipped = failed = missing = 0
+
+    for i, result in enumerate(
+        extractor.extract.map(video_names, order_outputs=False), start=1
+    ):
+        tag = result.split(":")[0]
+        if tag == "done":      done += 1
+        elif tag == "skip":    skipped += 1
+        elif tag == "missing": missing += 1
+        else:                  failed += 1
+        print(f"[{i:3d}/{len(video_names)}] {result}")
+
+    print(
+        f"\nDone — extracted: {done}  skipped: {skipped}  "
+        f"missing: {missing}  failed: {failed}"
+    )
