@@ -1,173 +1,76 @@
-# THUMOS14 Temporal Action Detection
+# ActionFormer: Localizing Actions with Transformers
 
-A two-stage pipeline for temporal action detection on the THUMOS14 benchmark, trained and evaluated on Modal cloud compute.
+This repository contains the implementation of **ActionFormer**, a powerful transformer-based model for temporal action detection (TAD), along with a convolutional baseline and support for multiple backbones (I3D and VideoMAE v2).
 
-## Overview
+## Model Architectures
 
-This project detects and localizes actions in untrimmed videos across 20 action classes. Rather than training end-to-end, we use a two-stage approach:
+### 1. ActionFormer (LocPointTransformer)
+ActionFormer is a purely transformer-based architecture designed for single-stage temporal action localization. It represents a shift from traditional anchor-based or convolutional detectors by leveraging the power of transformers to model long-range temporal dependencies.
 
-1. **Feature Extraction** — A pre-trained video backbone (X3D-M or VideoMAE) encodes each video into a sequence of clip-level feature vectors. This is done once and the features are stored persistently.
-2. **Temporal Head Training** — A lightweight transformer or CNN model is trained on the stored features to predict per-clip action labels. Since we only train the head, each training run takes ~20 minutes on an A100.
+- **Encoder**: Utilizes a stack of Transformer blocks with **Local Multi-Head Self-Attention (LMHSA)**. This allows the model to handle long video sequences by restricting attention to a local window, ensuring computational efficiency.
+- **Feature Pyramid Network (FPN)**: Employs a multi-scale feature pyramid to detect actions of varying durations (from very short to very long).
+- **Detection Heads**: 1D convolutional heads that perform point-based classification and regression (predicting distances to the start and end of action segments).
+- **Training Objective**: Optimized using a combination of sigmoid focal loss for classification and Distance-IoU (DIoU) loss for regression.
 
-This approach is standard in the temporal action detection literature and makes iteration fast and cheap.
+### 2. Baseline (Convolutional TAD)
+A simplified, convolution-only variant of ActionFormer. It serves as a strong baseline to highlight the benefits of the transformer encoder.
 
----
-
-## Project Structure
-
-```
-thumos-action-recognition/
-│
-├── configs/
-│   └── base_config.yaml          # All hyperparameters and paths — edit this to change runs
-│
-├── modal_pipeline/
-│   ├── app.py                    # Shared Modal app/volume/image definitions (legacy, mostly unused)
-│   ├── data_prep.py              # Downloads raw videos from Google Drive into Modal Volume
-│   ├── extract_features_remote.py # Runs feature extraction on Modal GPU
-│   ├── train_remote.py           # Runs temporal head training on Modal GPU
-│   └── evaluate_remote.py        # Runs mAP evaluation on Modal GPU
-│
-├── src/
-│   ├── dataset.py                # Dataset classes for raw video and pre-extracted features
-│   ├── extract_features.py       # Feature extraction logic (called by extract_features_remote.py)
-│   ├── train.py                  # Training loop (called by train_remote.py)
-│   ├── evaluate.py               # mAP computation: compute_ap, compute_map
-│   ├── utils.py                  # Logging, checkpointing, IoU utilities
-│   └── models/
-│       ├── __init__.py
-│       ├── backbone.py           # Video backbones: X3D-M, VideoMAE-Base, VideoMAE-Large
-│       └── temporal_model.py     # Temporal heads: TransformerModel, TemporalCNNModel
-│
-├── requirements.txt
-└── README.md
-```
+- **Architecture**: Replaces the Transformer blocks in the encoder with **1D Convolutional layers**.
+- **Pyramid**: Uses an Identity or simplified FPN.
+- **Heads**: Same point-based detection heads as ActionFormer.
+- **Efficiency**: Characterized by faster training and lower memory footprint, suitable for faster prototyping.
 
 ---
 
-## Dataset
+## Feature Extraction (Backbones)
 
-We use **THUMOS14**, which contains untrimmed videos across 20 sports action classes. The data is stored in a persistent Modal Volume (`thumos-vol`) with the following layout:
+We compare two distinct backbones for extracting the underlying video features used by the detection models.
 
-```
-thumos-vol/
-├── raw/
-│   ├── videos/
-│   │   ├── val/         # 200 videos — used for training the temporal head
-│   │   └── test/        # 213 videos — used for evaluation
-│   └── annotations/
-│       └── thumos_14_anno.json   # Action segment annotations from OpenTAD
-│
-├── features/
-│   └── clip_level/      # Pre-extracted X3D-M features, one .pt file per video
-│
-├── checkpoints/         # Saved model weights, one per epoch + best.pt
-└── logs/                # Training logs
-```
+### I3D (Inflated 3D ConvNet)
+- **Architecture**: Based on Inception-v1 inflated into 3D space.
+- **Feature Dimension**: 2048-dimensional (RGB stream).
+- **Pre-training**: Typically pre-trained on Kinetics-400.
+- **Strengths**: Excels at capturing local motion and appearance features in a dense, short-range temporal window.
 
-**Important naming note:** In `thumos_14_anno.json`, the `training` subset corresponds to the `val/` videos on disk, and the `validation` subset corresponds to the `test/` videos on disk. This is standard THUMOS14 convention and is confusing — don't rename anything.
+### VideoMAE V2 (Video Masked Autoencoder)
+- **Architecture**: Vision Transformer (ViT-Base).
+- **Feature Dimension**: 768-dimensional.
+- **Pre-training**: Large-scale self-supervised pre-training using Masked Autoencoding.
+- **Strengths**: Provides superior global temporal context and modeling capabilities due to the ViT architecture and massive pre-training scope.
 
 ---
 
-## Setup
+## 2x2 Comparison: Feature Extraction vs. TAD Models
 
-**1. Install dependencies and authenticate with Modal:**
+The following grid summarizes the interaction between the feature backbones and the temporal action detection models.
+
+| | **I3D Features (2048D)** | **VideoMAE V2 Features (768D)** |
+|:---:|:---|:---|
+| **Baseline (CNN)** | **Standard Baseline**: Uses local 3D-CNN features with a 1D-CNN detector. Fastest and least computationally demanding. | **Modern Baseline**: Leverages superior ViT features but uses a simpler CNN-based detection pipeline. |
+| **ActionFormer (Transformer)** | **Classic ActionFormer**: Multi-scale transformer detection on top of 3D-CNN features. A robust and high-performing setup. | **SOTA Pipeline**: The most powerful combination. Transformer-based detection on top of large-scale ViT features for maximum accuracy. |
+
+---
+
+## Usage
+
+### Feature Extraction
+Features can be extracted using the Modal pipeline:
 ```bash
-pip install -r requirements.txt
-modal setup
+modal run modal_pipeline/modal_extract.py --clip-len 16 --clip-stride 8
 ```
 
-**2. Set up rclone credentials for Google Drive access (one-time):**
+### Training
+Train the model using the provided configurations:
 ```bash
-rclone config   # follow prompts, name the remote "gdrive"
-modal secret create rclone-config \
-    RCLONE_CONFIG_CONTENT="$(cat ~/.config/rclone/rclone.conf)"
+# ActionFormer with VideoMAE v2
+modal run modal_pipeline/modal_train.py --config-path configs/thumos_videomae2_actionformer.yaml
+
+# Baseline with I3D
+modal run modal_pipeline/modal_train.py --config-path configs/thumos_i3d_baseline.yaml
 ```
 
----
-
-## Running the Pipeline
-
-### Step 1 — Upload data to Modal Volume (one-time)
+### Evaluation
+Evaluate a trained checkpoint:
 ```bash
-modal run modal_pipeline/data_prep.py
+modal run modal_pipeline/modal_eval.py --config-path configs/thumos_videomae2_actionformer.yaml --resume /vol/ckpt/ActionFormer/checkpoint.pth.tar
 ```
-
-### Step 2 — Extract features (one-time per backbone)
-```bash
-modal run modal_pipeline/extract_features_remote.py
-```
-This takes ~35 minutes on an A100 for 200 training videos.
-
-### Step 3 — Train the temporal head
-```bash
-modal run modal_pipeline/train_remote.py
-```
-Takes ~20 minutes on an A100 for 30 epochs.
-
-### Step 4 — Evaluate
-```bash
-modal run modal_pipeline/evaluate_remote.py
-```
-Reports mAP at IoU thresholds 0.3, 0.4, 0.5, 0.6, 0.7.
-
-### Step 5 — Download a checkpoint
-```bash
-modal volume get thumos-vol /checkpoints/best.pt ./local_checkpoints/best.pt
-```
-
----
-
-## Configuration
-
-All hyperparameters live in `configs/base_config.yaml`. Key settings:
-
-```yaml
-model:
-  backbone: "x3d_m"        # choices: x3d_m | videomae_base | videomae_large
-  model: "transformer"      # choices: transformer | cnn
-  num_classes: 20
-
-data:
-  clip_len_sec: 2.0         # length of each sliding window clip
-  stride_sec: 1.0           # stride between clips
-  window_size: 128          # number of clips per training sample
-
-training:
-  epochs: 30
-  lr: 0.0001
-  batch_size: 32
-```
-
----
-
-## Adding a New Model
-
-To add a new backbone, add a branch to `build_backbone()` in `src/models/backbone.py`:
-
-```python
-elif backbone_name == "your_model":
-    model = ...             # your model definition
-    feature_dim = ...       # output feature dimension
-    return model, feature_dim
-```
-
-To add a new temporal head, add a branch to `build_temporal_model()` in `src/models/temporal_model.py` and set `model: "your_model"` in `base_config.yaml`.
-
-**Important:** If you change the backbone, you need to re-run feature extraction since the feature dimensions will be different. Store features in a new subdirectory (e.g. `/vol/features/videomae_base/`) to avoid overwriting X3D-M features, and update `feature_dir` in `base_config.yaml` accordingly.
-
----
-
-## Evaluation Protocol
-
-We follow the standard THUMOS14 evaluation protocol: mAP at IoU thresholds {0.3, 0.4, 0.5, 0.6, 0.7}. Per-clip logits from the temporal head are converted to temporal segments by thresholding sigmoid outputs and finding contiguous positive runs. mAP is computed per class and averaged.
-
----
-
-## Modal Tips
-
-- All training jobs are **ephemeral** — the app disappears after the job finishes, but data written to the Volume persists.
-- Use `modal volume ls thumos-vol /path` to inspect Volume contents.
-- Use `--detach` flag for long jobs if you don't want to keep your terminal open: `modal run --detach modal_pipeline/train_remote.py`
-- GPU can be changed in each `_remote.py` file by editing the `GPU = "A100"` line. `"T4"` is cheapest for debugging, `"A100"` is fastest for full runs.
-- Always call `volume.commit()` at the end of any function that writes to the Volume.
