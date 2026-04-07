@@ -70,6 +70,47 @@ All configs share: `lr=1e-4`, `weight_decay=0.05`, `batch_size=2`, `epochs=30` (
 
 ## Replication Guide
 
+### Download Dataset and Annotations
+
+The raw THUMOS14 data for this project is provided as a zip file, and annotations are provided in a separate Google Drive folder.
+
+- Raw dataset zip: https://drive.google.com/file/d/1oI1_xNpQ1yIUT92rlXuaqnvOzHXxMeui/view
+- Annotations folder: https://drive.google.com/drive/folders/1ee-ZeGXK5U78R5tc528-hu9C-goUmt8r
+
+Recommended method:
+1. Download both from your browser (Google Drive may rate-limit CLI downloads for large files/folders).
+2. Extract the raw dataset zip under `data/THUMOS14/`.
+3. Copy annotation files from the annotations Drive folder into `data/THUMOS14/annotations/`.
+
+Expected local structure:
+
+```text
+data/
+  THUMOS14/
+    videos/
+      val/
+      test/
+    annotations/
+      annotations/
+        thumos_14_anno.json
+        category_idx.txt
+        frame_count_raw_video.json
+```
+
+Optional CLI method (if `gdown` works in your environment):
+
+```bash
+pip install gdown
+
+# Download raw dataset zip
+gdown --fuzzy "https://drive.google.com/file/d/1oI1_xNpQ1yIUT92rlXuaqnvOzHXxMeui/view"
+
+# Download annotations folder recursively
+gdown --folder "https://drive.google.com/drive/folders/1ee-ZeGXK5U78R5tc528-hu9C-goUmt8r"
+```
+
+Then extract/move files into the structure above.
+
 ### Prerequisites
 - [Modal](https://modal.com/) account and CLI installed (`pip install modal`, `modal setup`)
 - A Modal volume named `Thumos14` containing:
