@@ -16,24 +16,9 @@ dataset:
   max_seq_len: 2304
 
 model:
-  backbone_type: conv
   fpn_type: identity
-  backbone_arch: [1, 1, 3]
-  scale_factor: 2
-  regression_range: [[0, 4], [4, 8], [8, 16], [16, 10000]]
-  embd_kernel_size: 3
-  embd_dim: 512
-  embd_with_ln: true
-  fpn_dim: 512
-  fpn_with_ln: true
-  fpn_start_level: 0
-  head_dim: 512
-  head_kernel_size: 3
-  head_num_layers: 2
-  head_with_ln: true
   max_buffer_len_factor: 6.0
-  use_abs_pe: false
-  use_rel_pe: false
+  n_mha_win_size: 19
 
 opt:
   learning_rate: 0.0001
@@ -49,8 +34,6 @@ train_cfg:
   cls_prior_prob: 0.01
   center_sample: radius
   center_sample_radius: 1.5
-  dropout: 0.0
-  droppath: 0.0
 
 test_cfg:
   voting_thresh: 0.7
@@ -59,4 +42,4 @@ test_cfg:
   min_score: 0.001
   multiclass_nms: True
 
-output_folder: /vol/ckpt/Baseline-I3D
+output_folder: /vol/ckpt/ActionFormer-Videomae2
